@@ -1,0 +1,34 @@
+﻿# macOS
+.DS_Store
+__MACOSX/
+._*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# RL artifacts (big, regenerable)
+runs/
+logs/
+tensorboard/
+wandb/
+checkpoints/
+models/
+*.zip
+*.pt
+*.pth
+
+# Godot
+.godot/
+.import/
+
+# OS/editor
+Thumbs.db
+.idea/
+.vscode/
+
+# macOS Godot build artifact (re-export Windows build from source)
+B_ACE.app/

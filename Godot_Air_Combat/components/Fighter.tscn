@@ -1,0 +1,76 @@
+[gd_scene load_steps=12 format=3 uid="uid://3xxv82w5v8bo"]
+
+[ext_resource type="Script" uid="uid://duod4igmr4wa1" path="res://components/Fighter.gd" id="2"]
+[ext_resource type="Script" uid="uid://bp8bswc0lbw6y" path="res://components/Detection.gd" id="2_7x3gy"]
+[ext_resource type="ArrayMesh" uid="uid://degvmpojwh6bo" path="res://assets/RadarBeam.obj" id="3_oycbp"]
+
+[sub_resource type="SphereShape3D" id="SphereShape3D_6pjqh"]
+margin = 1.0
+radius = 2.0
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_7poeg"]
+albedo_color = Color(0, 0.537255, 0.117647, 1)
+
+[sub_resource type="PrismMesh" id="PrismMesh_7c5vi"]
+lightmap_size_hint = Vector2i(54, 46)
+material = SubResource("StandardMaterial3D_7poeg")
+left_to_right = -0.1
+size = Vector3(9, 3.5, 1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_1p6ca"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_15eh7"]
+albedo_color = Color(0.0666667, 0.0313726, 1, 1)
+
+[sub_resource type="PrismMesh" id="PrismMesh_o8vq1"]
+material = SubResource("StandardMaterial3D_15eh7")
+size = Vector3(10, 8, 0.5)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_y8agd"]
+emission = Color(0.264862, 0.480182, 0.987935, 1)
+emission_energy_multiplier = 1.88
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_563rj"]
+transparency = 1
+albedo_color = Color(0.72549, 0.72549, 0.72549, 0.0196078)
+
+[node name="Fighter" type="CharacterBody3D"]
+disable_mode = 1
+collision_mask = 2
+script = ExtResource("2")
+metadata/id = 0
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+shape = SubResource("SphereShape3D_6pjqh")
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.888617, 0.45865, 0, -0.45865, 0.888617, -0.705931, 57.8745, 114.771)
+fov = 65.4
+near = 0.001
+
+[node name="RenderModel" type="Node3D" parent="."]
+transform = Transform3D(-1, 0, 1.50996e-07, 0, 1, 0, -1.50996e-07, 0, -1, 0, 0, 0)
+
+[node name="Vertical" type="MeshInstance3D" parent="RenderModel"]
+transform = Transform3D(-4.30473e-08, 7.5904e-09, -1, 0.173648, 0.984808, 0, 0.984808, -0.173648, -4.37114e-08, -4.78053e-08, 0.979133, 1.09366)
+mesh = SubResource("PrismMesh_7c5vi")
+surface_material_override/0 = SubResource("StandardMaterial3D_1p6ca")
+
+[node name="Wings" type="MeshInstance3D" parent="RenderModel"]
+transform = Transform3D(1, 1.42109e-14, 4.37114e-08, 4.37114e-08, 0, -1, 0, 1, 1.91069e-15, -1.42109e-14, 5.96046e-08, 2.14578e-21)
+mesh = SubResource("PrismMesh_o8vq1")
+surface_material_override/0 = SubResource("StandardMaterial3D_y8agd")
+
+[node name="Radar" type="Area3D" parent="."]
+collision_layer = 4
+script = ExtResource("2_7x3gy")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Radar"]
+transform = Transform3D(-455, 0, 788.083, 0, 100, 0, -788.083, 0, -455, 0, 0, 0)
+mesh = ExtResource("3_oycbp")
+surface_material_override/0 = SubResource("StandardMaterial3D_563rj")
+
+[connection signal="area_entered" from="Radar" to="Radar" method="_on_radar_area_entered"]
+[connection signal="area_exited" from="Radar" to="Radar" method="_on_radar_area_exited"]
+[connection signal="body_entered" from="Radar" to="Radar" method="_on_body_entered" flags=3]
+[connection signal="body_exited" from="Radar" to="Radar" method="_on_body_exited" flags=3]
