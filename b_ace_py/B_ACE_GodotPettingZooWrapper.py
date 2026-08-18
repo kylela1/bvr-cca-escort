@@ -23,6 +23,7 @@ from .godot_env import GodotEnv
 from pettingzoo.utils import ParallelEnv
 
 from .utils import ActionSpaceProcessor, convert_macos_path
+from .contracts import assert_observation_labels
 import numpy as np
 import atexit
 from sys import platform
@@ -95,6 +96,13 @@ class B_ACE_GodotPettingZooWrapper(GodotEnv, ParallelEnv):
         self.observation_labels = env_info["observation_labels"]
         first_key = str(101)
         self.observation_labels_flat = list(self.observation_labels[first_key])
+
+        ##############################
+        # Fail loudly, immediately, if Godot's actual observation layout doesn't match what
+        # positional-index code (enriched_observation_wrapper_ablation.py,
+        # aggressive_hunter_fixed.py) assumes -- see b_ace_py/contracts.py
+        ##############################
+        assert_observation_labels(self.observation_labels_flat, agent_key=first_key)
         ##############################
         # Check if observation labels have been printed before
         ##############################
@@ -112,7 +120,6 @@ class B_ACE_GodotPettingZooWrapper(GodotEnv, ParallelEnv):
                     print(f"{i:>2}: {label}")
             print("=== End Observation Labels ===\n")
             self._printed_observation_labels = True
-        self.action_spaces = env_info["action_spaces"]
 
         self.tuple_action_spaces = [
             spaces.Tuple([v for _, v in action_space.items()]) for action_space in self.action_spaces

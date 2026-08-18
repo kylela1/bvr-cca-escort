@@ -8,11 +8,13 @@ VecNormalize statistics to prevent train/eval mismatch from normalization drift,
 optionally decays the learning rate and entropy coefficient to stabilize fine-tuning.
 
 Within the training pipeline, this callback is instantiated in train_bace_clean.py and
-passed to PPO.learn(). It runs evaluation episodes at a fixed interval, saves checkpoints
-when new bests are achieved, and monitors for sustained performance decline. The rollback
-mechanism addresses a common RL failure mode where the policy catastrophically forgets
-previously learned behavior. The permanent VecNormalize freeze feature prevents a subtle
-bug where restored policies see differently-scaled observations than they were trained on.
+passed to SkippableTrainPPO.learn() (this callback requires the model to be a
+SkippableTrainPPO instance, defined in this same file -- see its docstring for why). It runs
+evaluation episodes at a fixed interval, saves checkpoints when new bests are achieved, and
+monitors for sustained performance decline. The rollback mechanism addresses a common RL
+failure mode where the policy catastrophically forgets previously learned behavior. The
+permanent VecNormalize freeze feature prevents a subtle bug where restored policies see
+differently-scaled observations than they were trained on.
 
 Key configurable parameters: eval_freq controls steps between evaluations (default:
 200,000). n_eval_episodes sets episodes per eval (default: 15). max_checkpoints is the
@@ -35,50 +37,46 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import torch as th
+from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv
 
+from env_factory import get_split_norm_wrapper_from_vec_env
 
-def get_split_norm_wrapper_from_vec_env(vec_env):
+
+class SkippableTrainPPO(PPO):
     """
-    Extract the SplitNormalizationWrapper from a VecEnv wrapper stack.
+    PPO subclass that lets a callback skip the next N train() calls via a public method,
+    instead of monkey-patching `model.train` onto the instance.
 
-    The wrapper stack is typically:
-    VecNormalize -> DummyVecEnv -> [shaping wrappers] -> SplitNormalizationWrapper -> EnrichedObservationWrapper -> base_env
+    RollbackEvaluationCallbackTopK needs to no-op PPO's training step for a few updates
+    immediately after a rollback, because the rollout buffer collected just before the
+    rollback was gathered under the (now-reverted) pre-rollback policy and is stale. The
+    previous approach reassigned `self.model.train` to a wrapper closure, which leaves a
+    'train' key in `model.__dict__`; SB3's `model.save()` cloudpickles everything in
+    `__dict__` except an explicit exclusion list, and a bound method's `__self__` bypasses
+    that filtering, dragging in unpicklable objects (e.g. the live env's socket) reachable
+    from the model -- this caused `TypeError: cannot pickle '_thread.lock' object` on save.
 
-    Returns None if no SplitNormalizationWrapper is found.
+    Subclassing instead means the override lives on the class, not the instance -- nothing
+    is ever added to `model.__dict__`, so this failure mode can't recur.
     """
-    ##############################
-    # Check if vec_env is a VecNormalize with a venv attribute or just use it directly
-    ##############################
-    if hasattr(vec_env, 'venv'):
-        dummy_vec = vec_env.venv
-    else:
-        dummy_vec = vec_env
 
-    ##############################
-    # Extract the first environment from DummyVecEnv's environment list
-    ##############################
-    if hasattr(dummy_vec, 'envs') and len(dummy_vec.envs) > 0:
-        env = dummy_vec.envs[0]
-    else:
-        return None
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._skip_train_counter = 0
 
-    ##############################
-    # Traverse through the wrapper stack to find SplitNormalizationWrapper
-    ##############################
-    while env is not None:
-        if type(env).__name__ == 'SplitNormalizationWrapper':
-            return env
-        ##############################
-        # Move to the next wrapped environment in the stack
-        ##############################
-        if hasattr(env, 'env'):
-            env = env.env
-        else:
-            break
+    def skip_next_n_train_calls(self, n: int) -> None:
+        """Make the next n calls to train() no-ops (used after a rollback)."""
+        self._skip_train_counter = int(n)
 
-    return None
+    def train(self) -> None:
+        if self._skip_train_counter > 0:
+            self._skip_train_counter -= 1
+            if self.verbose > 0:
+                print(f"   ⏭️  Skipping training update (buffer stabilization: {self._skip_train_counter} remaining)")
+            return
+        super().train()
 
 
 @dataclass(order=True)
@@ -195,11 +193,7 @@ class RollbackEvaluationCallbackTopK(BaseCallback):
         
         # NEW (v5): Track permanent freeze state
         self._vecnormalize_permanently_frozen = False
-        
-        # Buffer mismatch handling - skip training counter
-        self._skip_train_counter = 0
-        self._original_train_fn = None
-        
+
         # Tracking state
         self.best_mean_reward = -np.inf
         self.best_timestep = 0
@@ -235,22 +229,19 @@ class RollbackEvaluationCallbackTopK(BaseCallback):
     def _init_callback(self) -> None:
         """
         Called when the callback is initialized.
-        Wraps the model's train function to handle skip logic after rollback.
+
+        Requires the model to be a SkippableTrainPPO instance (see that class's docstring) --
+        the post-rollback "skip N training updates" mechanism is implemented there via a
+        public method, not by patching `model.train` onto this instance.
         """
-        self._original_train_fn = self.model.train
-
-        def wrapped_train():
-            ##############################
-            # Check if we should skip this training update for buffer stabilization
-            ##############################
-            if self._skip_train_counter > 0:
-                self._skip_train_counter -= 1
-                if self.verbose > 0:
-                    print(f"   ⏭️  Skipping training update (buffer stabilization: {self._skip_train_counter} remaining)")
-                return
-            return self._original_train_fn()
-
-        self.model.train = wrapped_train
+        if not isinstance(self.model, SkippableTrainPPO):
+            raise TypeError(
+                "RollbackEvaluationCallbackTopK requires the model to be a SkippableTrainPPO "
+                f"instance (got {type(self.model).__name__}). Construct the model with "
+                "`from rollback_eval_callback import SkippableTrainPPO` and use it in place "
+                "of `stable_baselines3.PPO` -- this callback's post-rollback buffer-stabilization "
+                "skip relies on SkippableTrainPPO.skip_next_n_train_calls()."
+            )
 
     def _on_training_start(self) -> None:
         """Called at the start of training."""
@@ -304,11 +295,6 @@ class RollbackEvaluationCallbackTopK(BaseCallback):
             print(f"⭐ INITIAL BEST MODEL saved")
             print(f"{'='*60}\n")
 
-    def _on_training_end(self) -> None:
-        """Restore original train function on training end."""
-        if self._original_train_fn is not None:
-            self.model.train = self._original_train_fn
-
     def _get_current_lr(self) -> float:
         """Get the current learning rate value."""
         if hasattr(self.model, 'learning_rate'):
@@ -317,6 +303,16 @@ class RollbackEvaluationCallbackTopK(BaseCallback):
             # If learning rate is a function, compute it using progress; otherwise use static value
             ##############################
             if callable(lr):
+                ##############################
+                # PRIVATE SB3 API: `model._total_timesteps` (verified against stable-baselines3
+                # 2.9.0, see requirements.txt). It's set in BaseAlgorithm.__init__ / _setup_learn
+                # as "used for updating schedules" but has no public getter -- SB3's own
+                # equivalent progress computation (BaseAlgorithm._update_learning_rate) is
+                # itself a private method, and there is no supported public API for a callback
+                # to read total-timesteps-for-this-learn-call. If this breaks on an SB3 upgrade,
+                # re-check BaseAlgorithm.__init__ / _setup_learn for where total timesteps ends
+                # up stored.
+                ##############################
                 progress = 1.0 - (self.num_timesteps / self.model._total_timesteps)
                 return lr(progress) * self.current_lr_multiplier
             else:
@@ -347,9 +343,31 @@ class RollbackEvaluationCallbackTopK(BaseCallback):
         if callable(self._base_lr_schedule):
             new_schedule = self._create_scaled_lr_schedule(self._base_lr_schedule, new_multiplier)
             self.model.learning_rate = new_schedule
+
+            ##############################
+            # PRIVATE-ish SB3 API: `model.lr_schedule` (verified against stable-baselines3
+            # 2.9.0). It's a plain, non-underscore instance attribute (set in
+            # BaseAlgorithm._setup_model from `self.learning_rate`), so it's not name-mangled
+            # private, but there is no public setter/method for changing it after construction --
+            # SB3 only ever reads it internally, once per train() call, via the private
+            # BaseAlgorithm._update_learning_rate(). We overwrite it directly here (mirroring
+            # what _update_learning_rate would read) because that's the only way to change the
+            # active schedule mid-training; re-verify this attribute name/location still exists
+            # on any SB3 upgrade.
+            ##############################
             self.model.lr_schedule = new_schedule
 
+            # See the PRIVATE SB3 API comment on `model._total_timesteps` in _get_current_lr().
             current_lr = new_schedule(1.0 - (self.num_timesteps / self.model._total_timesteps))
+
+            ##############################
+            # `model.policy.optimizer` is a standard PyTorch Optimizer (not SB3-private), and
+            # writing `param_groups[i]['lr']` directly is PyTorch's own idiom for changing an
+            # optimizer's learning rate outside of a scheduler.step() call -- this part isn't
+            # SB3-private-API reliance, just a direct optimizer mutation done because we're
+            # applying our own multiplier on top of SB3's schedule rather than replacing it via
+            # any SB3-provided hook (none exists for this "apply an extra multiplier" use case).
+            ##############################
             for param_group in self.model.policy.optimizer.param_groups:
                 param_group['lr'] = current_lr
         else:
@@ -716,7 +734,7 @@ class RollbackEvaluationCallbackTopK(BaseCallback):
 
         self._update_entropy_coef(self.entropy_decay_factor)
 
-        self._skip_train_counter = self.skip_updates_after_rollback
+        self.model.skip_next_n_train_calls(self.skip_updates_after_rollback)
         if self.verbose > 0:
             print(f"   ⏭️  Will skip next {self.skip_updates_after_rollback} training updates (buffer stabilization)")
 

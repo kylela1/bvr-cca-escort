@@ -658,7 +658,8 @@ class PursuitEvasionFeatures:
         projection = np.dot(AD_vec, AT_unit)
         
         # Perpendicular distance from defender to A-T line
-        perp_distance = np.abs(np.cross(AT_unit, AD_vec))
+        # (2D cross product z-component; np.cross no longer accepts 2D vectors as of NumPy 2.0)
+        perp_distance = np.abs(AT_unit[0] * AD_vec[1] - AT_unit[1] * AD_vec[0])
         
         # Geometric defensibility criteria:
         # 1. Defender should be able to reach intercept point before attacker reaches target
@@ -1136,167 +1137,6 @@ class PursuitEvasionFeatures:
             'fully_surrounded': min_width < 0.1,  # Very small safe cone
             'heading_to_safe_cone': heading_to_cone
         }
-    
-    # =========================================================================
-    # FEATURE VECTOR COMPUTATION
-    # =========================================================================
-    
-    def compute_features_for_agent(self,
-                                    agent_pos: np.ndarray,
-                                    agent_vel: np.ndarray,
-                                    agent_heading: float,
-                                    agent_speed: float,
-                                    threats: List[Dict],
-                                    targets: List[Dict] = None) -> np.ndarray:
-        """
-        Compute full feature vector for a single agent.
-        
-        This is the main interface for the RL wrapper.
-        
-        Args:
-            agent_pos: Agent position [x, y]
-            agent_vel: Agent velocity [vx, vy]
-            agent_heading: Agent heading in radians
-            agent_speed: Agent speed scalar
-            threats: List of threat dicts with 'position', 'speed', 'heading'
-            targets: List of target/goal dicts (optional)
-            
-        Returns:
-            Feature vector (numpy array) with normalized values
-        """
-        features = []
-        
-        # Agent's own normalized state
-        features.append(agent_speed / self.default_pursuer_speed)  # Normalized speed
-        
-        # Process each threat
-        for i, threat in enumerate(threats[:4]):  # Limit to 4 threats
-            threat_pos = np.array(threat.get('position', [0, 0])[:2])
-            threat_speed = threat.get('speed', self.default_pursuer_speed)
-            threat_range = threat.get('range', self.default_pursuer_range)
-            capture_radius = threat.get('capture_radius', self.default_capture_radius)
-            
-            # Speed ratio
-            mu = self.compute_speed_ratio(agent_speed, threat_speed)
-            features.append(mu)
-            
-            # Distance and LOS
-            los_angle, distance = self.compute_line_of_sight(agent_pos, threat_pos)
-            features.append(distance / self.normalize_distance)  # Normalized distance
-            
-            # Aspect angle
-            aspect = self.compute_aspect_angle(agent_heading, los_angle)
-            features.append(aspect / np.pi)  # Normalized to [-1, 1]
-            
-            # Apollonius intercept
-            apollo = self.compute_apollonius_intercept(
-                threat_pos, agent_pos, agent_heading, mu
-            )
-            features.append(apollo['time_to_capture'] / 100.0)  # Normalized time
-            features.append(1.0 if apollo['capture_feasible'] else 0.0)
-            
-            # BEZ penetration
-            bez = self.compute_bez_penetration(
-                agent_pos, agent_heading, threat_pos, mu, threat_range, capture_radius
-            )
-            features.append(bez['normalized_penetration'])
-            features.append(1.0 if bez['inside_bez'] else 0.0)
-            
-            # DMC
-            dmc = self.compute_dmc(
-                agent_pos, agent_heading, threat_pos, mu, threat_range, capture_radius
-            )
-            features.append(dmc['dmc_normalized'])
-            
-            # Heading error to optimal escape
-            heading_to_safe = dmc['safe_heading_ccw'] - agent_heading
-            heading_to_safe = (heading_to_safe + np.pi) % (2 * np.pi) - np.pi
-            features.append(heading_to_safe / np.pi)
-        
-        # Pad if fewer than 4 threats (10 features per threat)
-        features_per_threat = 10
-        while len(features) < 1 + 4 * features_per_threat:
-            features.append(0.0)
-        
-        # Multi-threat aggregate features
-        if threats:
-            safe_cone = self.compute_safe_heading_cone(
-                agent_pos, agent_heading, threats,
-                self.compute_speed_ratio(agent_speed, self.default_pursuer_speed),
-                self.default_pursuer_range, self.default_capture_radius
-            )
-            features.append(safe_cone['safe_cone_width_normalized'])
-            features.append(float(safe_cone['fully_surrounded']))
-        else:
-            features.extend([1.0, 0.0])
-        
-        return np.array(features, dtype=np.float32)
-    
-    def get_feature_names(self) -> List[str]:
-        """Return names of all features for interpretability."""
-        names = ['agent_speed_normalized']
-        
-        for i in range(4):
-            prefix = f'threat_{i}_'
-            names.extend([
-                prefix + 'speed_ratio',
-                prefix + 'distance_norm',
-                prefix + 'aspect_angle_norm',
-                prefix + 'time_to_capture_norm',
-                prefix + 'capture_feasible',
-                prefix + 'bez_penetration_norm',
-                prefix + 'inside_bez',
-                prefix + 'dmc_normalized',
-                prefix + 'heading_to_safe_norm',
-            ])
-        
-        names.extend([
-            'safe_cone_width_norm',
-            'fully_surrounded'
-        ])
-        
-        return names
-
-
-# =============================================================================
-# CONVENIENCE FUNCTIONS FOR GODOT INTEGRATION
-# =============================================================================
-
-def extract_agent_state_from_obs(obs: np.ndarray, 
-                                  obs_labels: Dict[str, int]) -> Dict[str, Any]:
-    """
-    Extract agent state from Godot observation array using label mapping.
-    
-    Args:
-        obs: Raw observation array from Godot
-        obs_labels: Dict mapping label names to indices
-        
-    Returns:
-        Dict with extracted state values
-    """
-    state = {}
-    
-    # Common observation labels (adjust based on your Godot env)
-    pos_labels = ['pos_x', 'pos_y', 'position_x', 'position_y', 'x', 'y']
-    vel_labels = ['vel_x', 'vel_y', 'velocity_x', 'velocity_y', 'vx', 'vy']
-    heading_labels = ['heading', 'yaw', 'orientation', 'angle']
-    speed_labels = ['speed', 'velocity_magnitude', 'vel_mag']
-    
-    # Try to extract position
-    for label in pos_labels:
-        if label in obs_labels:
-            if 'position' not in state:
-                state['position'] = [0.0, 0.0]
-            idx = obs_labels[label]
-            if 'x' in label.lower():
-                state['position'][0] = obs[idx]
-            else:
-                state['position'][1] = obs[idx]
-    
-    # Similar for velocity, heading, speed...
-    # (Implementation depends on your specific observation space)
-    
-    return state
 
 
 # =============================================================================
@@ -1359,17 +1199,5 @@ if __name__ == "__main__":
         target_speed=0.1
     )
     print(f"  ATDDG (defender between): {atddg2}")
-    
-    print("\nTesting feature vector...")
-    threats = [{'position': [0.0, 0.0], 'speed': 1.0, 'range': 10.0}]
-    features = fc.compute_features_for_agent(
-        agent_pos=np.array([5.0, 2.0]),
-        agent_vel=np.array([0.8, 0.0]),
-        agent_heading=0.0,
-        agent_speed=0.8,
-        threats=threats
-    )
-    print(f"  Feature vector shape: {features.shape}")
-    print(f"  Feature vector: {features[:10]}...")
-    
+
     print("\nAll tests passed!")

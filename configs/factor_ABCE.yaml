@@ -1,0 +1,9 @@
+# Design run "ABCE": all three observation factors (A+B+C, ablation_config=all) plus Factor E
+# (action blending).
+# Launch with: python rl_files/run_from_config.py configs/factor_ABCE.yaml
+experiment_name: ABCE_test
+total_timesteps: 10000000
+seed: 42
+use_enriched_obs: true
+ablation_config: all
+expert_blending: true

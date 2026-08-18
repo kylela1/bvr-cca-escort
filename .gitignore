@@ -1,4 +1,4 @@
-﻿# macOS
+# macOS
 .DS_Store
 __MACOSX/
 ._*
@@ -12,6 +12,7 @@ env/
 
 # RL artifacts (big, regenerable)
 runs/
+runs_sb3/
 logs/
 tensorboard/
 wandb/
@@ -24,6 +25,9 @@ models/
 # Godot
 .godot/
 .import/
+
+# Exported native binaries (regenerate via Godot export, see CODEBASE_GUIDE.md §4.1)
+bin/
 
 # OS/editor
 Thumbs.db

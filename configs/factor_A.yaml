@@ -1,0 +1,7 @@
+# Factor A only: ATDDG observation features.
+# Launch with: python rl_files/run_from_config.py configs/factor_A.yaml
+experiment_name: factor_A
+total_timesteps: 10000000
+seed: 42
+use_enriched_obs: true
+ablation_config: geometry_only

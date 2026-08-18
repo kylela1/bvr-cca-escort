@@ -28,6 +28,7 @@ own sub-parameters for coefficients and decay schedules.
 """
 
 import argparse
+import atexit
 import json
 from pathlib import Path
 import sys
@@ -36,20 +37,10 @@ from typing import Any, Dict, Tuple, Callable, List
 import math
 
 import numpy as np
-import gymnasium as gym
-import torch as th
-import torch.nn.functional as F
-from stable_baselines3.common.buffers import RolloutBuffer
 
-from stable_baselines3 import PPO
-from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.logger import configure
-from stable_baselines3.common.type_aliases import RolloutReturn
-from stable_baselines3.common.utils import obs_as_tensor
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, CallbackList
-
-DEBUG_HVAA_OBS = False
 
 ##############################
 # Find B-ACE repository root and add to path
@@ -74,17 +65,8 @@ if REPO_ROOT.as_posix() not in sys.path:
 print(f"Using REPO_ROOT: {REPO_ROOT}")
 
 from b_ace_py.utils import load_b_ace_config
-from b_ace_py.B_ACE_GodotPettingZooWrapper import B_ACE_GodotPettingZooWrapper
-from b_ace_py.enriched_observation_wrapper_ablation import EnrichedObservationWrapper, SplitNormalizationWrapper
-from expert_alignment_wrapper import ExpertAlignmentWrapper, create_alignment_decay_fn, get_default_enriched_obs_indices
-from aggressive_hunter_fixed import AggressiveHunterFixed, get_default_obs_indices
-from expert_action_blending_wrapper import ExpertActionBlendingWrapper, create_alpha_decay_fn
-from sustained_turn_penalty import SustainedTurnPenaltySimple
-from hvaa_destruction_penalty import HVAADestructionPenalty
-from rollback_eval_callback import RollbackEvaluationCallbackTopK
-from track_aware_shaping import CombinedTrackAwareShaping
-from mission_tempo_shaping_perstep import MissionTempoShapingPerStep
-from reward_breakdown_logger import RewardBreakdownLogger, CompactRewardLogger
+from rollback_eval_callback import RollbackEvaluationCallbackTopK, SkippableTrainPPO
+from env_factory import build_env, get_split_norm_wrapper_from_vec_env
 
 try:
     from reward_component_eval_callback import RewardComponentEvalCallback
@@ -92,393 +74,6 @@ try:
 except ImportError:
     COMPONENT_TRACKING_AVAILABLE = False
     print("Note: RewardComponentEvalCallback not found. Using standard evaluation.")
-
-def linear_anneal(t: int, start: float, end: float, steps: int, hold: int = 0) -> float:
-    """Hold `start` for `hold` steps, then linearly move to `end` over `steps`."""
-    if t <= hold:
-        return float(start)
-    if steps <= 0:
-        return float(end)
-    x = min(1.0, max(0.0, (t - hold) / float(steps)))
-    return float(start + x * (end - start))
-
-
-class HVAASurvivalEveryNStepsBonus(gym.Wrapper):
-    def __init__(self, env, every_n_steps: int = 50, bonus: float = 0.05):
-        super().__init__(env)
-        self.every_n_steps = int(every_n_steps)
-        self.bonus = float(bonus)
-        self._t = 0
-
-    def reset(self, **kwargs):
-        self._t = 0
-        return self.env.reset(**kwargs)
-
-    def step(self, action):
-        obs, rew, terminated, truncated, info = self.env.step(action)
-
-        hvaa_alive = bool(info.get("hvaa_alive", True))
-
-        bonus_now = 0.0
-        ##############################
-        # Check if HVAA is alive and if it's time to give bonus
-        ##############################
-        if hvaa_alive and (self._t % self.every_n_steps == 0):
-            bonus_now = self.bonus
-            rew = float(rew) + bonus_now
-
-        info["hvaa_survival_bonus"] = float(bonus_now)
-
-        self._t += 1
-        return obs, rew, terminated, truncated, info
-
-class KillRewardWrapper(gym.Wrapper):
-    """Add reward when red_killed_event FIRST becomes True."""
-    def __init__(self, env, kill_reward: float = 10.0):
-        super().__init__(env)
-        self.kill_reward = kill_reward
-        self._already_awarded = False
-
-    def reset(self, **kwargs):
-        self._already_awarded = False
-        return self.env.reset(**kwargs)
-
-    def step(self, action):
-        obs, reward, term, trunc, info = self.env.step(action)
-
-        ##############################
-        # Award kill bonus only once when red_killed_event first becomes true
-        ##############################
-        if info.get("red_killed_event", False) and not self._already_awarded:
-            reward += self.kill_reward
-            self._already_awarded = True
-            print(f"[KILL REWARD] +{self.kill_reward} for killing red!")
-
-        return obs, reward, term, trunc, info
-
-
-class ActionSmoothnessPenalty(gym.Wrapper):
-    """
-    Scheduled smoothness penalty (jerk + magnitude), increases over training.
-    """
-    def __init__(
-        self,
-        env,
-        hdg_idx=0,
-        jerk_start=0.0,
-        jerk_end=0.002,
-        mag_start=0.0,
-        mag_end=0.001,
-        anneal_steps=2_000_000,
-        hold_steps=0,
-    ):
-        super().__init__(env)
-        self.hdg_idx = int(hdg_idx)
-
-        self.jerk_start = float(jerk_start)
-        self.jerk_end = float(jerk_end)
-        self.mag_start = float(mag_start)
-        self.mag_end = float(mag_end)
-        self.anneal_steps = int(anneal_steps)
-        self.hold_steps = int(hold_steps)
-
-        self.jerk_coef = float(jerk_start)
-        self.mag_coef = float(mag_start)
-
-        self.prev = None
-        self._global_step = 0
-
-    def set_global_step(self, t: int):
-        self._global_step = int(t)
-        if hasattr(self.env, "set_global_step"):
-            try:
-                self.env.set_global_step(t)
-            except Exception:
-                pass
-
-    def reset(self, **kwargs):
-        obs, info = self.env.reset(**kwargs)
-        self.prev = None
-        return obs, info
-
-    def step(self, action):
-        self.jerk_coef = linear_anneal(self._global_step, self.jerk_start, self.jerk_end, self.anneal_steps, hold=self.hold_steps)
-        self.mag_coef  = linear_anneal(self._global_step, self.mag_start,  self.mag_end,  self.anneal_steps, hold=self.hold_steps)
-
-        a = np.asarray(action, dtype=np.float32)
-        jerk_pen = 0.0
-        mag_pen = 0.0
-
-        ##############################
-        # If there was a previous action, compute jerk penalty
-        ##############################
-        if self.prev is not None:
-            d = float(a[self.hdg_idx] - self.prev[self.hdg_idx])
-            jerk_pen = d * d
-        m = float(a[self.hdg_idx])
-        mag_pen = m * m
-
-        obs, rew, terminated, truncated, info = self.env.step(action)
-
-        penalty = self.jerk_coef * jerk_pen + self.mag_coef * mag_pen
-        rew = float(rew) - penalty
-
-        info["pen_turn_jerk"] = float(self.jerk_coef * jerk_pen)
-        info["pen_turn_mag"]  = float(self.mag_coef * mag_pen)
-        info["pen_turn_total"] = float(penalty)
-        info["pen_turn_jerk_coef"] = float(self.jerk_coef)
-        info["pen_turn_mag_coef"]  = float(self.mag_coef)
-
-        self.prev = a.copy()
-        return obs, rew, terminated, truncated, info
-
-class RangeClosingShaping(gym.Wrapper):
-    def __init__(self, env, range_idx: int, track_idx: int = 7,
-                 k: float = 30.0, clip_delta: float = 0.02,
-                 max_valid_delta: float = 0.05):
-        super().__init__(env)
-        self.range_idx = int(range_idx)
-        self.track_idx = int(track_idx)
-        self.k = float(k)
-        self.clip_delta = float(clip_delta)
-        self.max_valid_delta = float(max_valid_delta)
-        self.prev_range = None
-
-        self._delta_history = []
-        self._shaping_history = []
-        self._step_count = 0
-        self._anomaly_count = 0
-
-    def reset(self, **kwargs):
-        obs, info = self.env.reset(**kwargs)
-        self.prev_range = float(obs[self.range_idx])
-
-        self._delta_history = []
-        self._shaping_history = []
-        self._step_count = 0
-        self._anomaly_count = 0
-
-        return obs, info
-
-    def step(self, action):
-        obs, rew, terminated, truncated, info = self.env.step(action)
-        track = float(obs[self.track_idx]) > 0.5
-        shaping = 0.0
-
-        self._step_count += 1
-
-        ##############################
-        # If tracking target, compute reward shaping based on range closure
-        ##############################
-        if track and self.prev_range is not None:
-            cur_r = float(obs[self.range_idx])
-            raw_delta = float(self.prev_range - cur_r)
-
-            ##############################
-            # Filter out anomalous deltas caused by target loss or destruction
-            ##############################
-            if abs(raw_delta) > self.max_valid_delta:
-                self._anomaly_count += 1
-                self.prev_range = cur_r
-            else:
-                delta = float(np.clip(raw_delta, -self.clip_delta, self.clip_delta))
-                shaping = self.k * delta
-                rew = float(rew) + shaping
-                self.prev_range = cur_r
-        else:
-            self.prev_range = float(obs[self.range_idx])
-
-        info["range_close_shaping"] = float(shaping)
-
-        return obs, rew, terminated, truncated, info
-
-
-class FireCooldownWrapper(gym.Wrapper):
-    """
-    Fire gating with a schedule:
-      - early training: low cooldown, no rising-edge requirement (easier to learn kills)
-      - later training: higher cooldown + rising-edge requirement (realistic discipline)
-    """
-    def __init__(
-        self,
-        env,
-        fire_idx: int = 3,
-        threshold: float = 0.5,
-        cd_start: int = 20,
-        cd_end: int = 240,
-        cd_steps: int = 2_000_000,
-        cd_hold: int = 0,
-        rising_edge_after: int = 1_000_000,
-    ):
-        super().__init__(env)
-        self.fire_idx = int(fire_idx)
-        self.threshold = float(threshold)
-
-        self.cd_start = int(cd_start)
-        self.cd_end = int(cd_end)
-        self.cd_steps = int(cd_steps)
-        self.cd_hold = int(cd_hold)
-        self.rising_edge_after = int(rising_edge_after)
-
-        self._t = 0
-        self._last_fire_t = -10**9
-        self._prev_want_fire = False
-        self._global_step = 0
-
-        self.cooldown_steps = int(cd_start)
-
-    def set_global_step(self, t: int):
-        self._global_step = int(t)
-        if hasattr(self.env, "set_global_step"):
-            try:
-                self.env.set_global_step(t)
-            except Exception:
-                pass
-
-    def reset(self, **kwargs):
-        self._t = 0
-        self._last_fire_t = -10**9
-        self._prev_want_fire = False
-        return self.env.reset(**kwargs)
-
-    def step(self, action):
-        self.cooldown_steps = int(round(linear_anneal(
-            self._global_step, self.cd_start, self.cd_end, self.cd_steps, hold=self.cd_hold
-        )))
-        self.cooldown_steps = max(1, self.cooldown_steps)
-
-        a = np.array(action, dtype=np.float32, copy=True)
-        want_fire = float(a[self.fire_idx]) > self.threshold
-
-        ##############################
-        # Determine if rising-edge requirement should be enabled based on training progress
-        ##############################
-        use_rising_edge = (self._global_step >= self.rising_edge_after)
-        rising_edge = want_fire and (not self._prev_want_fire)
-
-        allow = False
-        ##############################
-        # Check if fire action is allowed based on cooldown and rising-edge requirements
-        ##############################
-        if want_fire:
-            ##############################
-            # Verify enough time has passed since last fire action
-            ##############################
-            if (self._t - self._last_fire_t) >= self.cooldown_steps:
-                ##############################
-                # Check rising-edge constraint if it's enabled
-                ##############################
-                if (not use_rising_edge) or rising_edge:
-                    allow = True
-
-        ##############################
-        # Set fire action based on whether it was allowed
-        ##############################
-        if allow:
-            a[self.fire_idx] = 1.0
-            self._last_fire_t = self._t
-        else:
-            a[self.fire_idx] = 0.0
-
-        self._prev_want_fire = want_fire
-
-        obs, rew, terminated, truncated, info = self.env.step(a)
-        self._t += 1
-
-        info["fire_cd_current"] = int(self.cooldown_steps)
-        info["fire_use_rising_edge"] = bool(use_rising_edge)
-        info["fire_want"] = bool(want_fire)
-        info["fire_allowed"] = bool(allow)
-        info["fire_cooldown_remaining_steps"] = int(max(0, self.cooldown_steps - (self._t - 1 - self._last_fire_t)))
-        return obs, rew, terminated, truncated, info
-
-class HeadingRateLimitWrapper(gym.Wrapper):
-    def __init__(self, env, hdg_idx=0, max_delta=0.15):
-        super().__init__(env)
-        self.hdg_idx = int(hdg_idx)
-        self.max_delta = float(max_delta)
-        self.prev_hdg_cmd = 0.0
-
-    def reset(self, **kwargs):
-        self.prev_hdg_cmd = 0.0
-        return self.env.reset(**kwargs)
-
-    def step(self, action):
-        a = np.array(action, dtype=np.float32, copy=True)
-        target = float(a[self.hdg_idx])
-        delta = np.clip(target - self.prev_hdg_cmd, -self.max_delta, self.max_delta)
-        a[self.hdg_idx] = self.prev_hdg_cmd + delta
-        self.prev_hdg_cmd = float(a[self.hdg_idx])
-        return self.env.step(a)
-
-class NanGuardWrapper(gym.Wrapper):
-    """
-    Raises immediately if obs/reward becomes NaN/Inf.
-    Also prints useful context to map the bad value back to a feature.
-    """
-    def __init__(self, env, name="env", print_first_n=20):
-        super().__init__(env)
-        self.name = name
-        self.step_i = 0
-        self.print_first_n = int(print_first_n)
-
-    def reset(self, **kwargs):
-        obs, info = self.env.reset(**kwargs)
-        self.step_i = 0
-        self._check_obs(obs, where="reset", info=info)
-        return obs, info
-
-    def step(self, action):
-        self.step_i += 1
-        obs, reward, terminated, truncated, info = self.env.step(action)
-
-        self._check_obs(obs, where="step", info=info)
-        self._check_reward(reward, info=info)
-
-        return obs, reward, terminated, truncated, info
-
-    def _check_obs(self, obs, where, info):
-        x = obs["obs"] if isinstance(obs, dict) and "obs" in obs else obs
-        arr = np.asarray(x, dtype=np.float32)
-
-        ##############################
-        # Check if any observation values are non-finite (NaN or Inf)
-        ##############################
-        if not np.all(np.isfinite(arr)):
-            bad = np.where(~np.isfinite(arr))[0]
-            print(f"\n[NAN-GUARD:{self.name}] Non-finite OBS at {where} step={self.step_i}")
-            print(f"  bad indices (first {self.print_first_n}): {bad[:self.print_first_n].tolist()}")
-            print(f"  bad values  (first {self.print_first_n}): {arr[bad[:self.print_first_n]]}")
-
-            ##############################
-            # Try to print feature labels if available for context
-            ##############################
-            labels = getattr(self.env, "observation_labels_flat", getattr(self.env, "observation_labels", None))
-            ##############################
-            # Print labels for bad observation indices
-            ##############################
-            if labels is not None and isinstance(labels, (list, tuple)) and len(labels) == len(arr):
-                for i in bad[:self.print_first_n]:
-                    print(f"  label[{i}] = {labels[i]}")
-
-            ##############################
-            # Print info keys for debugging context
-            ##############################
-            if isinstance(info, dict):
-                print("  info keys:", list(info.keys())[:50])
-
-            raise RuntimeError("Non-finite observation detected (NaN/Inf).")
-
-    def _check_reward(self, reward, info):
-        r = float(reward)
-        ##############################
-        # Check if reward value is non-finite (NaN or Inf)
-        ##############################
-        if not np.isfinite(r):
-            print(f"\n[NAN-GUARD:{self.name}] Non-finite REWARD at step={self.step_i}: {r}")
-            if isinstance(info, dict):
-                print("  info keys:", list(info.keys())[:50])
-            raise RuntimeError("Non-finite reward detected (NaN/Inf).")
 
 def print_wrapper_stack(env, name: str = "env"):
     """
@@ -568,380 +163,6 @@ def exponential_schedule(initial_value: float, final_value: float, decay_rate: f
         return final_value + (initial_value - final_value) * decay_factor
 
     return schedule
-
-class ExpertRolloutBuffer(RolloutBuffer):
-    """
-    RolloutBuffer + storage for expert actions (and mask).
-    We store expert actions per step so PPO's train() can add an imitation loss.
-    """
-    def reset(self) -> None:
-        super().reset()
-        self.expert_actions = np.zeros_like(self.actions, dtype=np.float32)
-        self.expert_mask = np.ones((self.buffer_size, self.n_envs), dtype=np.float32)
-
-class ExpertMixPPO(PPO):
-    """PPO with policy-side expert action mixing (Fix A).
-
-    This keeps PPO on-policy by ensuring the *executed* action is what gets stored in the rollout buffer,
-    along with a matching log-prob/value computed under the current policy.
-
-    Requirements:
-      - Training env (VecEnv) must wrap the base env with HierarchicalFSMActionWrapper (training only),
-        which exposes:
-            - expert_action(obs) -> action
-            - gate_action(action, obs) -> action  (optional fire gating)
-      - Evaluation env should NOT use expert mixing (pure policy).
-    """
-
-    def __init__(
-        self,
-        *args,
-        greedy_prob_fn=None,
-        use_fire_gate: bool = True,
-        bc_coef_fn=None,
-        bc_use_gated_expert: bool = True,
-        **kwargs
-    ):
-        super().__init__(*args, **kwargs)
-        self.greedy_prob_fn = greedy_prob_fn or (lambda t: 1.0)
-        self.use_fire_gate = bool(use_fire_gate)
-        self._src_counts = {"policy": 0, "expert": 0}
-        self._src_counts_ep = {"policy": 0, "expert": 0}
-
-        self.bc_coef_fn = bc_coef_fn or (lambda t: 0.0)
-        self.bc_use_gated_expert = bool(bc_use_gated_expert)
-
-    def _get_original_obs_for_expert(self, env):
-        ##############################
-        # If VecNormalize is used, expert should generally see original (unnormalized) obs
-        ##############################
-        if hasattr(env, "get_original_obs"):
-            try:
-                o = env.get_original_obs()
-                if o is not None:
-                    return o
-            except Exception:
-                pass
-        return self._last_obs
-
-    def _nan_tripwire(self, name: str, x):
-        """
-        Crash immediately if x contains NaN/Inf (torch tensor or numpy array).
-        """
-        if isinstance(x, th.Tensor):
-            ok = th.isfinite(x).all().item()
-        else:
-            x = np.asarray(x)
-            ok = np.isfinite(x).all()
-        if not ok:
-            raise RuntimeError(f"[NaN TRIPWIRE] non-finite detected in {name}")
-
-    def collect_rollouts(self, env, callback, rollout_buffer, n_rollout_steps: int) -> RolloutReturn:
-        assert self._last_obs is not None, "No previous observation was provided"
-
-        self.policy.set_training_mode(False)
-        rollout_buffer.reset()
-        callback.on_rollout_start()
-
-        n_steps = 0
-        ##############################
-        # Collect rollout steps until we reach the requested number
-        ##############################
-        while n_steps < n_rollout_steps:
-            with th.no_grad():
-                obs_tensor = obs_as_tensor(self._last_obs, self.device)
-                self._nan_tripwire("self._last_obs (raw)", self._last_obs)
-                self._nan_tripwire("obs_tensor", obs_tensor)
-
-                actions_pi, values_pi, log_probs_pi = self.policy(obs_tensor)
-
-            actions_pi_np = actions_pi.cpu().numpy()
-            self._nan_tripwire("actions_pi_np (policy sampled)", actions_pi_np)
-
-            ##############################
-            # Mix policy and expert actions based on greedy probability
-            ##############################
-            greedy_prob = float(self.greedy_prob_fn(self.num_timesteps))
-            use_policy_mask = (np.random.rand(env.num_envs) < greedy_prob)
-            n_pol = int(np.sum(use_policy_mask))
-            n_exp = int(np.sum(~use_policy_mask))
-
-            self._src_counts["policy"] += n_pol
-            self._src_counts["expert"] += n_exp
-            self._src_counts_ep["policy"] += n_pol
-            self._src_counts_ep["expert"] += n_exp
-            ##############################
-            # Debug output for action source tracking
-            ##############################
-            if (self.num_timesteps % 5000) == 0:
-                expert_used = int(np.sum(~use_policy_mask))
-                print(f"[MIX DEBUG] t={self.num_timesteps} greedy_prob={greedy_prob:.3f} "
-                    f"policy_used={int(np.sum(use_policy_mask))} expert_used={expert_used}")
-
-            obs_for_expert = self._get_original_obs_for_expert(env)
-
-            ##############################
-            # Compute expert actions for all environments
-            ##############################
-            expert_all = []
-            for i in range(env.num_envs):
-                obs_i = obs_for_expert[i]
-                a_exp = env.env_method("expert_action", obs_i, indices=[i])[0]
-                expert_all.append(a_exp)
-            expert_all = np.asarray(expert_all, dtype=np.float32)
-
-            ##############################
-            # Apply fire gating to expert actions if enabled
-            ##############################
-            if self.use_fire_gate and self.bc_use_gated_expert:
-                gated_exp = []
-                for i in range(env.num_envs):
-                    obs_i = obs_for_expert[i]
-                    a_i = env.env_method("gate_action", expert_all[i], obs_i, indices=[i])[0]
-                    gated_exp.append(a_i)
-                expert_all = np.asarray(gated_exp, dtype=np.float32)
-
-            mixed_actions = actions_pi_np.copy()
-            ##############################
-            # Replace policy actions with expert actions where indicated by mask
-            ##############################
-            if not np.all(use_policy_mask):
-                expert_actions = []
-                for i in range(env.num_envs):
-                    ##############################
-                    # Use policy action if mask indicates it, otherwise use expert
-                    ##############################
-                    if use_policy_mask[i]:
-                        expert_actions.append(mixed_actions[i])
-                    else:
-                        obs_i = obs_for_expert[i]
-                        a_i = env.env_method("expert_action", obs_i, indices=[i])[0]
-                        expert_actions.append(a_i)
-                mixed_actions = np.asarray(expert_actions, dtype=np.float32)
-
-            ##############################
-            # Apply fire gating to all executed actions
-            ##############################
-            if self.use_fire_gate:
-                gated = []
-                for i in range(env.num_envs):
-                    obs_i = obs_for_expert[i]
-                    a_i = env.env_method("gate_action", mixed_actions[i], obs_i, indices=[i])[0]
-                    gated.append(a_i)
-                mixed_actions = np.asarray(gated, dtype=np.float32)
-
-            self._nan_tripwire("mixed_actions (executed)", mixed_actions)
-
-            ##############################
-            # Recompute log-prob and value for the executed action
-            ##############################
-            with th.no_grad():
-                mixed_actions_t = th.as_tensor(mixed_actions).to(self.device)
-                values_mixed, log_probs_mixed, _ = self.policy.evaluate_actions(obs_tensor, mixed_actions_t)
-            self._nan_tripwire("values_mixed", values_mixed)
-            self._nan_tripwire("log_probs_mixed", log_probs_mixed)
-
-            ##############################
-            # Execute the mixed action in the environment
-            ##############################
-            env.env_method("set_global_step", int(self.num_timesteps))
-            low, high = self.action_space.low, self.action_space.high
-            mixed_actions = np.clip(mixed_actions, low, high).astype(np.float32)
-            new_obs, rewards, dones, infos = env.step(mixed_actions)
-            ##############################
-            # Log episode termination details
-            ##############################
-            if np.any(dones):
-                done_ids = np.where(dones)[0].tolist()
-                print(f"[ACTION-SOURCE EP-END] done_envs={done_ids} "
-                    f"policy_steps={self._src_counts_ep['policy']} expert_steps={self._src_counts_ep['expert']} "
-                    f"(greedy_prob={greedy_prob:.3f}, t={self.num_timesteps})")
-                self._src_counts_ep = {"policy": 0, "expert": 0}
-
-            self._nan_tripwire("new_obs", new_obs)
-            self._nan_tripwire("rewards", rewards)
-
-            self.num_timesteps += env.num_envs
-
-            ##############################
-            # Store executed action and its corresponding value/logprob
-            ##############################
-            rollout_buffer.add(
-                self._last_obs,
-                mixed_actions,
-                rewards,
-                self._last_episode_starts,
-                values_mixed,
-                log_probs_mixed,
-            )
-
-            ##############################
-            # Store expert actions for imitation loss computation
-            ##############################
-            if hasattr(rollout_buffer, "expert_actions"):
-                j = rollout_buffer.pos - 1
-                rollout_buffer.expert_actions[j] = expert_all
-                rollout_buffer.expert_mask[j] = 1.0
-
-            self._last_obs = new_obs
-            self._last_episode_starts = dones
-
-            callback.update_locals(locals())
-            if not callback.on_step():
-                callback.on_rollout_end()
-                return False, n_steps * env.num_envs, None
-
-            n_steps += 1
-
-        ##############################
-        # Compute returns and advantage estimates for all collected steps
-        ##############################
-        with th.no_grad():
-            obs_tensor = obs_as_tensor(self._last_obs, self.device)
-            values = self.policy.predict_values(obs_tensor)
-
-        rollout_buffer.compute_returns_and_advantage(values, self._last_episode_starts)
-        callback.on_rollout_end()
-        return True, n_steps * env.num_envs, None
-
-    def train(self) -> None:
-        """
-        Same as SB3 PPO.train(), but with an added imitation (BC) loss:
-            L = L_ppo + bc_coef(t) * MSE(a_mean(obs), a_expert)
-        """
-        self.policy.set_training_mode(True)
-        self._update_learning_rate(self.policy.optimizer)
-
-        clip_range = self.clip_range(self._current_progress_remaining)
-        ##############################
-        # Get clipped value function coefficient if using value clipping
-        ##############################
-        if self.clip_range_vf is None:
-            clip_range_vf = None
-        else:
-            clip_range_vf = self.clip_range_vf(self._current_progress_remaining)
-
-        entropy_losses, pg_losses, value_losses, bc_losses = [], [], [], []
-        clip_fractions = []
-
-        bc_coef = float(self.bc_coef_fn(self.num_timesteps))
-
-        continue_training = True
-        ##############################
-        # Run multiple epochs of PPO training on collected rollout data
-        ##############################
-        for epoch in range(self.n_epochs):
-            approx_kl_divs = []
-
-            ##############################
-            # Iterate through minibatches of rollout data
-            ##############################
-            for rollout_data in self.rollout_buffer.get(self.batch_size):
-                actions = rollout_data.actions
-                ##############################
-                # Convert actions to long for discrete action spaces
-                ##############################
-                if isinstance(self.action_space, gym.spaces.Discrete):
-                    actions = actions.long().flatten()
-
-                values, log_prob, entropy = self.policy.evaluate_actions(rollout_data.observations, actions)
-                values = values.flatten()
-
-                advantages = rollout_data.advantages
-                advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
-                ratio = th.exp(log_prob - rollout_data.old_log_prob)
-
-                ##############################
-                # Compute PPO policy loss with clipping
-                ##############################
-                policy_loss_1 = advantages * ratio
-                policy_loss_2 = advantages * th.clamp(ratio, 1 - clip_range, 1 + clip_range)
-                policy_loss = -th.min(policy_loss_1, policy_loss_2).mean()
-
-                ##############################
-                # Compute value function loss with optional clipping
-                ##############################
-                if clip_range_vf is None:
-                    values_pred = values
-                else:
-                    values_pred = rollout_data.old_values + th.clamp(
-                        values - rollout_data.old_values,
-                        -clip_range_vf,
-                        clip_range_vf,
-                    )
-                value_loss = F.mse_loss(rollout_data.returns, values_pred)
-
-                ##############################
-                # Compute entropy regularization loss
-                ##############################
-                if entropy is None:
-                    entropy_loss = -th.mean(-log_prob)
-                else:
-                    entropy_loss = -th.mean(entropy)
-
-                ##############################
-                # Compute behavioral cloning loss for imitation learning
-                ##############################
-                bc_loss = th.tensor(0.0, device=self.device)
-                if bc_coef > 0.0 and hasattr(self.rollout_buffer, "expert_actions"):
-                    ##############################
-                    # Extract expert actions for this minibatch
-                    ##############################
-                    if hasattr(rollout_data, "indices"):
-                        exp_np = self.rollout_buffer.expert_actions.reshape(-1, self.action_space.shape[0])[rollout_data.indices]
-                        exp = th.as_tensor(exp_np, device=self.device, dtype=th.float32)
-
-                        ##############################
-                        # Get mean action from policy distribution
-                        ##############################
-                        dist = self.policy.get_distribution(rollout_data.observations)
-                        if hasattr(dist, "distribution") and hasattr(dist.distribution, "mean"):
-                            a_mean = dist.distribution.mean
-                        elif hasattr(dist, "mean"):
-                            a_mean = dist.mean
-                        else:
-                            a_mean = actions.float()
-
-                        bc_loss = F.mse_loss(a_mean, exp)
-
-                loss = policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss + bc_coef * bc_loss
-
-                ##############################
-                # Optimization step with gradient clipping
-                ##############################
-                self.policy.optimizer.zero_grad()
-                loss.backward()
-                th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
-                self.policy.optimizer.step()
-
-                pg_losses.append(policy_loss.item())
-                value_losses.append(value_loss.item())
-                entropy_losses.append(entropy_loss.item())
-                bc_losses.append(float(bc_loss.item()) if isinstance(bc_loss, th.Tensor) else float(bc_loss))
-                clip_fractions.append(th.mean((th.abs(ratio - 1) > clip_range).float()).item())
-
-                ##############################
-                # Track KL divergence for early stopping
-                ##############################
-                with th.no_grad():
-                    approx_kl_div = th.mean(rollout_data.old_log_prob - log_prob).cpu().numpy()
-                    approx_kl_divs.append(approx_kl_div)
-
-            ##############################
-            # Early stopping if KL divergence exceeds target threshold
-            ##############################
-            if self.target_kl is not None and np.mean(approx_kl_divs) > 1.5 * self.target_kl:
-                continue_training = False
-                break
-
-        self._n_updates += self.n_epochs
-        self.logger.record("train/policy_gradient_loss", np.mean(pg_losses))
-        self.logger.record("train/value_loss", np.mean(value_losses))
-        self.logger.record("train/entropy_loss", np.mean(entropy_losses))
-        self.logger.record("train/bc_loss", np.mean(bc_losses))
-        self.logger.record("train/bc_coef", bc_coef)
-        self.logger.record("train/clip_fraction", np.mean(clip_fractions))
 
 
 class MetricsCollectionCallback(BaseCallback):
@@ -1120,47 +341,6 @@ class MetricsCollectionCallback(BaseCallback):
                 f"points from {len(self.all_episode_rewards)} total episodes for file size"
             ),
         }
-
-def get_split_norm_wrapper_from_vec_env(vec_env):
-    """
-    Extract the SplitNormalizationWrapper from a VecEnv wrapper stack.
-
-    The wrapper stack is typically:
-    VecNormalize -> DummyVecEnv -> [shaping wrappers] -> SplitNormalizationWrapper -> EnrichedObservationWrapper -> base_env
-
-    Returns None if no SplitNormalizationWrapper is found.
-    """
-    ##############################
-    # Get the base env from VecNormalize/DummyVecEnv
-    ##############################
-    if hasattr(vec_env, 'venv'):
-        dummy_vec = vec_env.venv
-    else:
-        dummy_vec = vec_env
-
-    ##############################
-    # DummyVecEnv stores envs in .envs list
-    ##############################
-    if hasattr(dummy_vec, 'envs') and len(dummy_vec.envs) > 0:
-        env = dummy_vec.envs[0]
-    else:
-        return None
-
-    ##############################
-    # Traverse the wrapper stack to find SplitNormalizationWrapper
-    ##############################
-    while env is not None:
-        if type(env).__name__ == 'SplitNormalizationWrapper':
-            return env
-        ##############################
-        # Move to the wrapped environment
-        ##############################
-        if hasattr(env, 'env'):
-            env = env.env
-        else:
-            break
-
-    return None
 
 
 class EvaluationBasedCheckpointCallback(BaseCallback):
@@ -1540,7 +720,13 @@ def _resolve_env_path() -> str:
         f"  - {searched}"
     )
 
-def _parse_args():
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """
+    Builds (but does not parse with) the argument parser. Split out from _parse_args() so
+    other tools (rl_files/run_from_config.py) can introspect the set of valid flag names
+    without executing this module's __main__ body or touching sys.argv -- purely mechanical
+    split, no change in parsed defaults/behavior.
+    """
     parser = argparse.ArgumentParser(description="Train SB3 PPO on B-ACE with decay schedules and seed support.")
     parser.add_argument(
         "--config",
@@ -1792,198 +978,23 @@ def _parse_args():
     parser.add_argument("--blend-debug", action="store_true", default=False,
                         help="Enable debug output for blending wrapper")
 
+    parser.add_argument("--use-wandb", action="store_true", default=False,
+                        help="Opt-in: also mirror this run's TensorBoard logs to Weights & "
+                             "Biases (requires `pip install wandb` and being logged in). "
+                             "Off by default; training behaves identically without it.")
+    parser.add_argument("--wandb-project", type=str, default="bvr-cca-escort",
+                        help="W&B project name (only used if --use-wandb is set).")
+    parser.add_argument("--wandb-entity", type=str, default=None,
+                        help="W&B entity/team name (only used if --use-wandb is set; "
+                             "defaults to your default W&B entity).")
+
     parser.set_defaults(use_enriched_obs=False)
 
-    return parser.parse_args()
+    return parser
 
 
-class SingleAgentBACEEnv(gym.Env):
-    """
-    SB3-compatible single-agent wrapper around B_ACE_GodotPettingZooWrapper.
-
-    Uses "reset first" approach: resets env immediately, builds spaces from actual data.
-    This avoids issues with PettingZoo's observation_space() method API.
-    """
-    metadata = {"render.modes": ["human"]}
-
-    def __init__(
-        self,
-        bace_config: Dict[str, Any],
-        controlled_agent_id: str = "agent_0",
-        max_episode_steps: int = 36000,
-    ):
-        super().__init__()
-        self._max_episode_steps = max_episode_steps
-        self._elapsed_steps = 0
-
-        self._ma_env = B_ACE_GodotPettingZooWrapper(device="cpu", **bace_config)
-        self.observation_labels = getattr(self._ma_env, "observation_labels", None)
-
-        if hasattr(self._ma_env, "get_hvaa_indices"):
-            self.get_hvaa_indices = self._ma_env.get_hvaa_indices
-
-        self.obs_map = getattr(self._ma_env, "obs_map", None)
-        self.observation_labels_flat = getattr(self._ma_env, "observation_labels_flat", None)
-
-        self.obs_labels = getattr(self._ma_env, "obs_labels", None)
-
-        obs_dict, info_dict = self._ma_env.reset()
-        self.obs_map = getattr(self._ma_env, "obs_map", self.obs_map)
-        self.observation_labels_flat = getattr(self._ma_env, "observation_labels_flat", self.observation_labels_flat)
-        self._last_obs_dict = obs_dict
-
-        agents = getattr(self._ma_env, "agents", [])
-        ##############################
-        # Determine which agent to control
-        ##############################
-        if agents:
-            if controlled_agent_id in agents:
-                self.controlled_agent_id = controlled_agent_id
-            else:
-                print(f"WARNING: '{controlled_agent_id}' not in env.agents={agents}, "
-                      f"defaulting to '{agents[0]}'")
-                self.controlled_agent_id = agents[0]
-        else:
-            self.controlled_agent_id = controlled_agent_id
-
-        ##############################
-        # Build observation space from actual observation
-        ##############################
-        if self.controlled_agent_id in obs_dict:
-            raw_obs = obs_dict[self.controlled_agent_id]
-        else:
-            raw_obs = next(iter(obs_dict.values()))
-
-        obs_vec = self._to_array(raw_obs)
-
-        self.observation_space = gym.spaces.Box(
-            low=-np.inf,
-            high=np.inf,
-            shape=obs_vec.shape,
-            dtype=np.float32,
-        )
-        print(f"[DEBUG] Built observation_space from reset: shape={obs_vec.shape}")
-
-        self.action_space = gym.spaces.Box(
-            low=-1.0,
-            high=1.0,
-            shape=(4,),
-            dtype=np.float32,
-        )
-        print(f"[DEBUG] Built action_space: shape=(4,)")
-
-    def _to_array(self, obj) -> np.ndarray:
-        """Recursively extract numeric vector from nested structures."""
-        if isinstance(obj, np.ndarray):
-            return obj.astype(np.float32)
-        ##############################
-        # Convert lists and tuples to numpy arrays
-        ##############################
-        if isinstance(obj, (list, tuple)):
-            return np.asarray(obj, dtype=np.float32)
-        ##############################
-        # Convert scalar values to single-element arrays
-        ##############################
-        if isinstance(obj, (float, int)):
-            return np.asarray([obj], dtype=np.float32)
-        ##############################
-        # Recursively extract from dictionaries
-        ##############################
-        if isinstance(obj, dict):
-            if "obs" in obj:
-                return self._to_array(obj["obs"])
-            for v in obj.values():
-                try:
-                    arr = self._to_array(v)
-                    if arr.dtype.kind in ("f", "i"):
-                        return arr
-                except (TypeError, ValueError):
-                    continue
-            raise RuntimeError(f"Could not extract obs from dict: {list(obj.keys())}")
-        raise RuntimeError(f"Unsupported observation type {type(obj)}")
-
-    def _extract_single_obs(self, obs_dict: Dict[str, Any]) -> np.ndarray:
-        """Extract observation for controlled agent."""
-        if self.controlled_agent_id in obs_dict:
-            raw_obs = obs_dict[self.controlled_agent_id]
-        else:
-            raw_obs = next(iter(obs_dict.values()))
-        return self._to_array(raw_obs)
-
-    def _build_action_payload(self, agent_action: np.ndarray) -> Any:
-        """Build action dict for all agents."""
-        clipped = np.clip(agent_action, -1.0, 1.0).astype(np.float32)
-
-        if hasattr(self._ma_env, "agents"):
-            return {agent: clipped for agent in self._ma_env.agents}
-        else:
-            return {self.controlled_agent_id: clipped}
-
-    def reset(self, *, seed: int | None = None, options: Dict[str, Any] | None = None):
-        super().reset(seed=seed)
-        self._elapsed_steps = 0
-
-        obs_dict, info_dict = self._ma_env.reset()
-        self.obs_map = getattr(self._ma_env, "obs_map", self.obs_map)
-        self.observation_labels_flat = getattr(self._ma_env, "observation_labels_flat", self.observation_labels_flat)
-        self._last_obs_dict = obs_dict
-
-        obs = self._extract_single_obs(obs_dict)
-        info = info_dict.get(self.controlled_agent_id, {}) if isinstance(info_dict, dict) else {}
-        return obs, info
-
-    def step(self, action: np.ndarray):
-        self._elapsed_steps += 1
-
-        action_dict = self._build_action_payload(action)
-        obs_dict, rew_dict, term_dict, trunc_dict, info_dict = self._ma_env.step(action_dict)
-        self._last_obs_dict = obs_dict
-
-        obs = self._extract_single_obs(obs_dict)
-
-        ##############################
-        # Extract reward for controlled agent
-        ##############################
-        if isinstance(rew_dict, dict):
-            reward = float(rew_dict.get(self.controlled_agent_id, 0.0))
-        else:
-            reward = float(rew_dict)
-
-        ##############################
-        # Extract termination signal for controlled agent
-        ##############################
-        if isinstance(term_dict, dict):
-            terminated = bool(term_dict.get(self.controlled_agent_id, False)) or bool(term_dict.get("__all__", False))
-        else:
-            terminated = bool(term_dict)
-
-        ##############################
-        # Extract truncation signal for controlled agent
-        ##############################
-        if isinstance(trunc_dict, dict):
-            truncated = bool(trunc_dict.get(self.controlled_agent_id, False)) or bool(trunc_dict.get("__all__", False))
-        else:
-            truncated = bool(trunc_dict)
-
-        ##############################
-        # Check if episode exceeded max steps
-        ##############################
-        if terminated or truncated:
-            print(f"[SINGLE-AGENT] step={self._elapsed_steps} terminated={terminated} truncated={truncated} "
-                  f"raw_term={term_dict} raw_trunc={trunc_dict}")
-
-        if self._elapsed_steps >= self._max_episode_steps and not terminated:
-            truncated = True
-
-        info = info_dict.get(self.controlled_agent_id, {}) if isinstance(info_dict, dict) else {}
-        return obs, reward, terminated, truncated, info
-
-    def render(self):
-        pass
-
-    def close(self):
-        if hasattr(self._ma_env, "close"):
-            self._ma_env.close()
+def _parse_args():
+    return _build_arg_parser().parse_args()
 
 
 def main():
@@ -2062,183 +1073,28 @@ def main():
 
     def make_env(log_dir_str, seed, is_eval: bool = False):
         def _thunk():
-            e = SingleAgentBACEEnv(
-                bace_config=B_ACE_config,
-                controlled_agent_id="agent_0",
+            return build_env(
+                B_ACE_config,
+                is_eval=is_eval,
+                log_dir_str=log_dir_str,
+                seed=seed,
+                use_enriched_obs=args.use_enriched_obs,
+                ablation_config=args.ablation_config,
+                expert_alignment=args.expert_alignment,
+                alignment_coef=args.alignment_coef,
+                alignment_decay_start=args.alignment_decay_start,
+                alignment_decay_end=args.alignment_decay_end,
+                expert_blending=args.expert_blending,
+                blend_initial_alpha=args.blend_initial_alpha,
+                blend_final_alpha=args.blend_final_alpha,
+                blend_decay_start=args.blend_decay_start,
+                blend_decay_end=args.blend_decay_end,
+                blend_decay_type=args.blend_decay_type,
+                blend_fire_mode=args.blend_fire_mode,
+                blend_debug=args.blend_debug,
                 max_episode_steps=13_500,
+                controlled_agent_id="agent_0",
             )
-
-            ##############################
-            # Apply enriched observation wrapper if enabled
-            ##############################
-            if args.use_enriched_obs:
-                e = EnrichedObservationWrapper(
-                    e,
-                    ablation_config=args.ablation_config,
-                    normalize_features=False,
-                    smooth_threat_loss=True,
-                    debug=False
-                )
-
-                base_obs_dim = e.original_obs_dim
-                print(f"  [Enriched Obs] Config: {args.ablation_config}")
-                print(f"  [Enriched Obs] Base dim: {base_obs_dim}, Enriched dim: {e.observation_space.shape[0]}")
-                print(f"  [Enriched Obs] Added features: {e.num_added_features}")
-
-                e = SplitNormalizationWrapper(e, base_obs_dim=base_obs_dim)
-                print(f"  [Split Normalization] Applied - base features normalized, enriched features passed through")
-            else:
-                print("\n" + "="*60)
-                print("USING BASELINE OBSERVATIONS (NO THEORETICAL FEATURES)")
-                print("="*60 + "\n")
-
-            ##############################
-            # Apply heading rate limiting wrapper
-            ##############################
-            e = HeadingRateLimitWrapper(e, hdg_idx=0, max_delta=0.15)
-
-            e = KillRewardWrapper(e, kill_reward=12.0)
-
-            e = ActionSmoothnessPenalty(
-                e,
-                hdg_idx=0,
-                jerk_start=0.0, jerk_end=0.0025,
-                mag_start=0.0,  mag_end=0.012,
-                hold_steps=1_500_000,
-                anneal_steps=4_500_000
-            )
-
-            e = MissionTempoShapingPerStep(
-                e,
-                penalty_per_step=-0.003,
-                bonus_per_step=0.006,
-                require_hvaa_alive=True,
-            )
-
-            e = SustainedTurnPenaltySimple(
-                e,
-                hdg_idx=0,
-                window_size=15,
-                turn_threshold=0.5,
-                penalty_coef=0.01,
-            )
-
-            e = CombinedTrackAwareShaping(
-                e,
-                range_idx=17,
-                track_idx=26,
-                track_loss_penalty=-0.3,
-                k_close=40.0,
-                asymmetry_ratio=2.0,
-                clip_delta=0.02,
-                max_valid_delta=0.05,
-                min_range_for_penalty=0.05,
-            )
-
-            e = FireCooldownWrapper(
-                e,
-                fire_idx=3,
-                cd_start=70,
-                cd_end=120,
-                cd_hold=10_000,
-                cd_steps=5_000_000
-            )
-
-            e = HVAASurvivalEveryNStepsBonus(e, every_n_steps=25, bonus=0.01)
-
-            ##############################
-            # Apply expert alignment wrapper if enabled and not in eval mode
-            ##############################
-            if args.expert_alignment and not is_eval:
-                expert = AggressiveHunterFixed(debug=False)
-                obs_indices = get_default_obs_indices()
-                alignment_decay = create_alignment_decay_fn(
-                    decay_start=args.alignment_decay_start,
-                    decay_end=args.alignment_decay_end,
-                    final_multiplier=0.3,
-                )
-                e = ExpertAlignmentWrapper(
-                    e, expert=expert, obs_indices=obs_indices,
-                    alignment_coef=args.alignment_coef,
-                    action_weights=np.array([1.0, 0.3, 0.6, 0.5]),
-                    decay_fn=alignment_decay,
-                )
-                print(f"Expert alignment wrapper added (TRAINING ONLY)")
-            elif args.expert_alignment and is_eval:
-                print(f"Expert alignment SKIPPED for evaluation environment")
-
-            ##############################
-            # Apply expert action blending wrapper if enabled and not in eval mode
-            ##############################
-            if args.expert_blending and not is_eval:
-                if args.expert_alignment:
-                    print("WARNING: Both --expert-alignment and --expert-blending are enabled!")
-                    print("   These are different approaches and should not be combined.")
-                    print("   Proceeding with both, but results may be unpredictable.")
-
-                expert_blend = AggressiveHunterFixed(debug=args.blend_debug)
-                obs_indices_blend = get_default_obs_indices()
-
-                alpha_decay = create_alpha_decay_fn(
-                    initial_alpha=args.blend_initial_alpha,
-                    final_alpha=args.blend_final_alpha,
-                    decay_start=args.blend_decay_start,
-                    decay_end=args.blend_decay_end,
-                    decay_type=args.blend_decay_type,
-                )
-
-                e = ExpertActionBlendingWrapper(
-                    e,
-                    expert=expert_blend,
-                    obs_indices=obs_indices_blend,
-                    alpha_fn=alpha_decay,
-                    blend_dims=[0, 1, 2],
-                    fire_blend_mode=args.blend_fire_mode,
-                    fire_gate_threshold=0.3,
-                    debug=args.blend_debug,
-                )
-                print(f"Expert action blending wrapper added (TRAINING ONLY)")
-                print(f"   Blending formula: action = alpha*expert + (1-alpha)*PPO")
-                print(f"   Alpha schedule: {args.blend_initial_alpha} -> {args.blend_final_alpha} ({args.blend_decay_type})")
-                print(f"   Decay window: {args.blend_decay_start:,} -> {args.blend_decay_end:,} steps")
-                print(f"   Fire mode: {args.blend_fire_mode}")
-            elif args.expert_blending and is_eval:
-                print(f"Expert action blending SKIPPED for evaluation environment")
-
-            obs, _ = e.reset()
-            print(f"\nEnvironment created")
-            print(f"   Observation dimension: {obs.shape[0]}")
-            print(f"   obs[0:10] = {np.round(obs[:10], 3)}")
-
-            if args.use_enriched_obs and obs.shape[0] > 27:
-                print(f"   Enriched features [27:]: {np.round(obs[27:], 3)}")
-
-            e = CompactRewardLogger(e, print_every_n=10)
-            e = NanGuardWrapper(e, name=("eval_env" if is_eval else "train_env"))
-
-            ##############################
-            # Termination trace wrapper for debugging
-            ##############################
-            class _TermTrace(gym.Wrapper):
-                def __init__(self, env):
-                    super().__init__(env)
-                    self._steps = 0
-                def reset(self, **kw):
-                    self._steps = 0
-                    return self.env.reset(**kw)
-                def step(self, action):
-                    o, r, term, trunc, i = self.env.step(action)
-                    self._steps += 1
-                    if term or trunc:
-                        print(f"[PRE-MONITOR] step={self._steps} term={term} trunc={trunc}")
-                    return o, r, term, trunc, i
-            e = _TermTrace(e)
-
-            e = Monitor(e, filename=str(Path(log_dir_str) / "monitor.csv"))
-
-            obs, _ = e.reset(seed=seed)
-            print(f"[DEBUG] Final observation shape: {obs.shape}")
-            return e
         return _thunk
 
     vec_env = DummyVecEnv([make_env(log_dir.as_posix(), args.seed)])
@@ -2267,6 +1123,25 @@ def main():
     print_wrapper_stack(vec_env, name="TRAIN vec_env (after VecNormalize)")
 
     print(f"[NEW***DEBUG] vec_env.observation_space: {vec_env.observation_space}")
+
+    ##############################
+    # Opt-in Weights & Biases mirror of the TensorBoard log directory (see
+    # IMPROVEMENT_PLAN_1_VISUALIZATION_AND_RUNNING.md Task 1). Off by default; when off, this
+    # block is a no-op and training is unaffected. `import wandb` is deliberately deferred to
+    # inside this `if` so the package is only required when --use-wandb is actually passed.
+    ##############################
+    if args.use_wandb:
+        import wandb
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=run_name,
+            config=vars(args),
+            sync_tensorboard=True,
+        )
+        atexit.register(wandb.finish)
+        print(f"\n[W&B] Logging to project='{args.wandb_project}' run='{run_name}' "
+              f"(mirroring TensorBoard via sync_tensorboard=True)\n")
 
     logger = configure(log_dir.as_posix(), ["stdout", "tensorboard"])
 
@@ -2318,7 +1193,7 @@ def main():
     def bc_coef_fn(t: int) -> float:
         return 0.0
 
-    model = PPO(
+    model = SkippableTrainPPO(
         policy="MlpPolicy",
         env=vec_env,
         learning_rate=lr_schedule,
@@ -2543,9 +1418,18 @@ def main():
     print(f"BEST MODEL:")
     print(f"  Path: {log_dir / 'best_model'}")
     print(f"  Eval reward: {eval_checkpoint_callback.best_mean_reward:.2f}")
-    print(f"  Found at: {eval_summary['timesteps'][eval_summary['mean_rewards'].index(eval_checkpoint_callback.best_mean_reward)]:,} steps")
-    print(f"")
-    print(f"Comparison: Best is {eval_checkpoint_callback.best_mean_reward - final_mean_reward:.2f} points better than final")
+    ##############################
+    # No periodic evaluation may have run yet (e.g. total_timesteps < eval_freq),
+    # in which case best_mean_reward is still its -inf sentinel and won't be in the list.
+    ##############################
+    if eval_summary["mean_rewards"] and eval_checkpoint_callback.best_mean_reward in eval_summary["mean_rewards"]:
+        best_idx = eval_summary["mean_rewards"].index(eval_checkpoint_callback.best_mean_reward)
+        print(f"  Found at: {eval_summary['timesteps'][best_idx]:,} steps")
+        print(f"")
+        print(f"Comparison: Best is {eval_checkpoint_callback.best_mean_reward - final_mean_reward:.2f} points better than final")
+    else:
+        print(f"  (no periodic evaluation completed during this run)")
+        print(f"")
     print(f"Number of evaluations: {eval_summary['n_evaluations']}")
     print(f"{'='*60}\n")
 
@@ -2621,6 +1505,10 @@ def main():
     print(f"{'='*60}\n")
 
     eval_env.close()
+
+    if args.use_wandb:
+        import wandb
+        wandb.finish()
 
 
 if __name__ == "__main__":

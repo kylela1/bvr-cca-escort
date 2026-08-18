@@ -1,0 +1,9 @@
+# Same as factor_BD.yaml, but across multiple seeds -- delegates to run_experiment.py instead
+# of a single train_bace_clean.py invocation (see the 'seeds' key below).
+# Launch with: python rl_files/run_from_config.py configs/factor_BD_multiseed.yaml
+experiment_name: BD_multiseed
+total_timesteps: 10000000
+seeds: [42, 123, 456, 789]
+use_enriched_obs: true
+ablation_config: engagement_only
+expert_alignment: true

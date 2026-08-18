@@ -1,0 +1,5 @@
+# Baseline: all experimental factors off (raw observations, no expert shaping).
+# Launch with: python rl_files/run_from_config.py configs/baseline.yaml
+experiment_name: baseline
+total_timesteps: 10000000
+seed: 42

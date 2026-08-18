@@ -5,12 +5,33 @@ Heuristic Feature Design and Training Guidance in Reinforcement Learning for
 Beyond-Visual-Range Escort Missions"). This document explains what each part of the repo
 does, how data actually flows end-to-end, how to set up the environment, and — in detail —
 where the code diverges from what the thesis text describes. It was produced by reading
-every Python file in full and auditing the Godot/GDScript simulation source; nothing in the
-repo was modified to produce this guide.
+every Python file in full and auditing the Godot/GDScript simulation source.
+
+> **Update (environment setup):** the environment-setup section (§4) has since been fully
+> executed on this machine — Godot exported, Python environment installed, and a real training
+> run confirmed working end-to-end. Three small, previously-undetected bugs that only surfaced
+> by actually running the code (not visible from reading it) were fixed as part of that; see
+> §4.4/§5.2b.
+>
+> **Update (wrappers/dependencies refactor):** the two follow-on improvement plans this guide's
+> findings fed into (`IMPROVEMENT_PLAN_1_VISUALIZATION_AND_RUNNING.md`,
+> `IMPROVEMENT_PLAN_2_WRAPPERS_AND_DEPENDENCIES.md`) have since been fully implemented and
+> verified. This resolved several findings §5 originally flagged as problems: the wrapper-stack
+> is no longer duplicated between training and evaluation (§2.3, §5.3), ~900 lines of dead code
+> listed in §5.4 have been deleted rather than just left inert, the `model.train` monkey-patch
+> bug's root cause is now structurally impossible (§5.2b), and several §5.7 code-quality gaps
+> (no `requirements.txt`, no tests, some docstring mismatches) are closed. **The rest of this
+> document — the reward-constant mismatches (§5.1), the functional Godot-side bugs (§5.2), the
+> approximated-theory notes (§5.5), and the statistical-machinery gaps (§5.6) — is unaffected**;
+> those are analysis/design findings about what the code *computes*, not the tooling refactor
+> described here, which deliberately changed no reward, observation, or training behavior
+> (verified via a structural equivalence-check tool, `tools/equivalence_check.py`, run before
+> and after every change). Sections below are updated in place to reflect the new state, with
+> superseded content marked rather than silently deleted where it's still useful context.
 
 > **How to read this document.** Section 1 is the map. Section 2 is "what do I change to do
-> X." Section 3 is setup. Section 4 is the full issues list — read it before you trust any
-> specific number quoted in the thesis against this code.
+> X." Section 3 is setup (now done — see above). Section 4 is the full issues list — read it
+> before you trust any specific number quoted in the thesis against this code.
 
 ---
 
@@ -61,7 +82,9 @@ disagree with each other and with the thesis text:
    a substantial, already-shaped scalar reward every physics tick from a `RewardsConfig` block
    in the JSON scenario config.
 2. A stack of ~8-10 Python `gym.Wrapper` classes applied in a fixed order inside
-   `rl_files/train_bace_clean.py`'s `make_env()` closure, each doing `reward = reward + shaping`.
+   `rl_files/env_factory.py`'s `build_env()` function (both `train_bace_clean.py` and
+   `evaluate_experiment_seeds.py` call this one function now — see §2.2/§2.3), each doing
+   `reward = reward + shaping`.
 3. A handful of hardcoded constants inside `SimManager.gd`/`Fighter.gd` that aren't exposed
    through any config path at all (e.g. the HVAA mission-success distance).
 
@@ -79,8 +102,9 @@ If you want to change "the reward function," you have to touch layers 1 and 2 (a
 | `godot_env.py` | `GodotEnv`: launches the Godot binary as a subprocess, opens a TCP socket, and implements the raw `{handshake, reset, action, config, env_info, close}` message protocol. Base class of `B_ACE_GodotPettingZooWrapper`; never used directly by the training scripts. |
 | `B_ACE_GodotPettingZooWrapper.py` | `B_ACE_GodotPettingZooWrapper(GodotEnv, ParallelEnv)`: the multi-agent PettingZoo-compatible environment. Sends the JSON scenario config to Godot, parses the returned per-agent observation/action spaces and observation *labels*, and exposes `reset()`/`step()` keyed by agent name (`"agent_0"`, `"agent_1"`, ...). **This class is already genuinely multi-agent** — see §2.4. |
 | `utils.py` | `load_b_ace_config()` (JSON config loader — returns `None` and only *prints* on failure, doesn't raise), `ActionSpaceProcessor` (converts Godot's tuple action space into a flat Box/MultiDiscrete for SB3), `convert_macos_path`. |
-| `pursuit_evasion_features.py` | `PursuitEvasionFeatures`: the closed-form/approximated geometry for Apollonius circles, Basic Engagement Zones (BEZ/WEZ), Dynamic Maneuvering Cue (DMC), Active Target Defense Differential Game (ATDDG), and Range-Limited Pursuit-Evasion (RLPE). This is where the thesis's Factor A/B/C math lives. Its own `compute_features_for_agent()`/`get_feature_names()`/`extract_agent_state_from_obs()` are **dead code** — only used by the file's own `if __name__=="__main__"` self-test, never imported elsewhere. The methods that *are* actually used are the lower-level ones (`compute_apollonius_intercept`, `compute_bez_boundary`, `compute_dmc`, `compute_atddg_defense_features`, `compute_barrier_hyperbola_value`, `compute_optimal_intercept_heading`, `compute_critical_escape_heading`, `compute_capture_probability_proxy`), called individually by the wrapper below. |
-| `enriched_observation_wrapper_ablation.py` | `EnrichedObservationWrapper`: appends the theoretical features to the base observation. `SplitNormalizationWrapper`: normalizes only the base (non-enriched) observation dims with its own Welford running-mean/var, leaving the enriched dims untouched, so that `VecNormalize` (with `norm_obs=False`) doesn't re-normalize them. Also defines `FeatureOnlyWrapper`/`create_enriched_env`/`get_ablation_summary`/`print_ablation_matrix` — **all dead code**, only exercised by this file's own demo block. |
+| `pursuit_evasion_features.py` | `PursuitEvasionFeatures`: the closed-form/approximated geometry for Apollonius circles, Basic Engagement Zones (BEZ/WEZ), Dynamic Maneuvering Cue (DMC), Active Target Defense Differential Game (ATDDG), and Range-Limited Pursuit-Evasion (RLPE). This is where the thesis's Factor A/B/C math lives. The methods actually used are the lower-level ones (`compute_apollonius_intercept`, `compute_bez_boundary`, `compute_dmc`, `compute_atddg_defense_features`, `compute_barrier_hyperbola_value`, `compute_optimal_intercept_heading`, `compute_critical_escape_heading`, `compute_capture_probability_proxy`), called individually by the wrapper below. *(Update: `compute_features_for_agent()`/`get_feature_names()`/`extract_agent_state_from_obs()`, previously dead code, have been deleted — see §5.4. Also fixed: `compute_atddg_defense_features`'s 2D cross-product call, which crashed under NumPy 2.x — see §5.2b.)* |
+| `enriched_observation_wrapper_ablation.py` | `EnrichedObservationWrapper`: appends the theoretical features to the base observation. `SplitNormalizationWrapper`: normalizes only the base (non-enriched) observation dims with its own Welford running-mean/var, leaving the enriched dims untouched, so that `VecNormalize` (with `norm_obs=False`) doesn't re-normalize them. *(Update: `FeatureOnlyWrapper`/`create_enriched_env`, previously dead code, have been deleted — see §5.4. `get_ablation_summary`/`print_ablation_matrix` were kept since the file's own `__main__` self-test still exercises them.)* |
+| `contracts.py` **(new)** | Declares, as plain data, the contract between Godot and the Python side that was previously implicit: `EXPECTED_OBSERVATION_LABELS` (the 27 raw observation label names, in order) and `EXPECTED_INFO_KEYS` (the `info`-dict keys Godot's `SimManager.gd` actually emits, enumerated from that file directly). `assert_observation_labels()` is called at environment-construction time (`B_ACE_GodotPettingZooWrapper.__init__`) and raises immediately if Godot's actual reported labels don't match — turning "every positional-index feature computation silently reads the wrong field" into a loud failure at construction time instead. `check_info_keys()` is a soft, one-time-per-episode warning (not an assertion) for unrecognized `info` keys — building this surfaced a real bug, see §5.2b/§5.3. |
 | `SimpleExample_B_ACE_config.json` | The scenario config `train_bace_clean.py` actually loads by default (`--config` default). 1 blue / 1 red / 1 HVAA, with randomized spawn blocks (`BlueSpawn`, `HVAASpawn`). **Its `RewardsConfig` numbers do not match the thesis** — see §4.2. |
 | `Default_B_ACE_config.json` | The upstream/generic B-ACE example config (num_agents: 4 blue / 3 red, no HVAA at all). Not what `train_bace_clean.py` defaults to; useful mainly as a reference for the engine's built-in reward defaults (they match `Sim_assets.gd`'s hardcoded `RewardsControl` defaults almost exactly). |
 
@@ -96,42 +120,47 @@ geometry_only` means "Factor A only," not literally "geometry."
 
 | File | Purpose |
 |---|---|
-| `train_bace_clean.py` (2,627 lines) | **The single most important file to understand.** Parses ~40 CLI flags, builds the full environment wrapper stack (hardcoded order, see §2.3 below), constructs a Stable-Baselines3 `PPO` model with the tuned hyperparameters as CLI defaults, trains via `model.learn()`, and runs a small ad-hoc final evaluation. Also defines ~15 custom `gym.Wrapper`/callback classes used nowhere else. |
-| `run_experiment.py` (523 lines) | A generic multi-seed launcher: loops over `--seeds`, invokes `train_bace_clean.py` once per seed via `subprocess`, forwarding any flags it doesn't itself recognize straight through. **It does not know about the 5 experimental factors or the 16-18 design configurations** — see §4.1, this is an important correction to how you might expect this file to work. |
-| `evaluate_experiment_seeds.py` (2,173 lines) | Loads trained checkpoints + `VecNormalize` stats per seed, runs deterministic evaluation episodes, and computes per-seed / cross-seed statistics. Implements far less of the thesis's Chapter IV statistical machinery than you'd expect — see §4.1. |
+| `env_factory.py` (871 lines) **(new)** | **The single file that defines the environment/wrapper stack.** Both `train_bace_clean.py` and `evaluate_experiment_seeds.py` call its one function, `build_env(bace_config, is_eval, ...)`, instead of each independently constructing their own copy the way they used to (see §2.3, §5.3 — this used to be a real, confirmed source of train/eval drift). Contains `SingleAgentBACEEnv` and the reward-shaping wrapper classes that used to be defined inline inside `train_bace_clean.py` (`HeadingRateLimitWrapper`, `KillRewardWrapper`, `ActionSmoothnessPenalty`, `FireCooldownWrapper`, `HVAASurvivalEveryNStepsBonus`, `NanGuardWrapper`, `linear_anneal`), plus `get_split_norm_wrapper_from_vec_env()`. The core reward-shaping portion of the stack is represented as an explicit ordered `(WrapperClass, kwargs)` list (`REWARD_SHAPING_STACK`) applied in a loop, rather than 150 lines of interleaved imperative construction. |
+| `train_bace_clean.py` (1,515 lines, down from 2,627) | **The file you'll edit most for hyperparameters/CLI flags.** Parses ~55 CLI flags (including `--use-wandb`/`--wandb-project`/`--wandb-entity`, new — see §4.5), calls `env_factory.build_env()` to construct the environment, constructs a `SkippableTrainPPO` model (see below) with the tuned hyperparameters as CLI defaults, trains via `model.learn()`, and runs a small ad-hoc final evaluation. No longer defines the reward-shaping wrapper classes itself (moved to `env_factory.py`) or the dead `ExpertRolloutBuffer`/`ExpertMixPPO` alternative-PPO implementation (deleted — see §5.4). |
+| `run_experiment.py` (523 lines) | A generic multi-seed launcher: loops over `--seeds`, invokes `train_bace_clean.py` once per seed via `subprocess`, forwarding any flags it doesn't itself recognize straight through (this pass-through is also what `run_from_config.py`'s multi-seed configs rely on — see §4.5). **It does not know about the 5 experimental factors or the 16-18 design configurations** — see §4.1, this is an important correction to how you might expect this file to work. |
+| `run_from_config.py` (new) | Declarative YAML run launcher (`python rl_files/run_from_config.py configs/factor_BD.yaml`) — see §4.5. Converts YAML keys (which must equal a real `train_bace_clean.py` argparse `dest` name) into the equivalent CLI invocation and shells out to it via `subprocess`, so a YAML-launched run can never diverge from the equivalent hand-typed command. Delegates to `run_experiment.py` for multi-seed configs (a `seeds:` list in the YAML) rather than reimplementing the seed loop. |
+| `evaluate_experiment_seeds.py` (1,969 lines, down from 2,173) | Loads trained checkpoints + `VecNormalize` stats per seed, runs deterministic evaluation episodes, and computes per-seed / cross-seed statistics. Implements far less of the thesis's Chapter IV statistical machinery than you'd expect — see §4.1. Its evaluation environment now calls `env_factory.build_env(..., is_eval=True)` — see §2.3/§5.3 for what changed. |
 
-**Wrapper/callback files** (all imported and layered together inside `train_bace_clean.py`'s
-`make_env()`):
+**Wrapper/callback files** (all imported and layered together inside `env_factory.py`'s
+`build_env()`, called by both `train_bace_clean.py` and `evaluate_experiment_seeds.py`):
 
 | File | Class(es) actually used | Maps to |
 |---|---|---|
 | `expert_alignment_wrapper.py` | `ExpertAlignmentWrapper` | Factor D (alignment-based reward shaping) |
 | `expert_action_blending_wrapper.py` | `ExpertActionBlendingWrapper` | Factor E (action blending) |
-| `aggressive_hunter_fixed.py` | `AggressiveHunterFixed` (2 sibling classes, `AggressiveHunterV3`/`AggressiveHunterTunable`, are dead code) | The scripted "expert" FSM that Factors D and E are built around |
+| `aggressive_hunter_fixed.py` | `AggressiveHunterFixed` (the two sibling classes, `AggressiveHunterV3`/`AggressiveHunterTunable`, were confirmed-dead and have been deleted — see §5.4) | The scripted "expert" FSM that Factors D and E are built around |
 | `sustained_turn_penalty.py` | `SustainedTurnPenaltySimple` | r_shape sustained-turn penalty |
 | `track_aware_shaping.py` | `CombinedTrackAwareShaping` | r_shape track-loss penalty + range-closure bonus |
 | `mission_tempo_shaping_perstep.py` | `MissionTempoShapingPerStep` | r_shape "red still alive" / mission-tempo terms |
-| `hvaa_destruction_penalty.py` | *(neither class is ever instantiated — dead code)* | Would-be r_env "-15 HVAA destroyed" term |
-| `reward_breakdown_logger.py` | `CompactRewardLogger` (`RewardBreakdownLogger` is imported but never instantiated) | Diagnostics only, no effect on reward |
-| `rollback_eval_callback.py` | `RollbackEvaluationCallbackTopK` | The checkpoint-rollback mechanism (thesis §4.2) |
+| `reward_breakdown_logger.py` | `CompactRewardLogger` (`RewardBreakdownLogger`, previously imported-but-dead, has been deleted — see §5.4) | Diagnostics only, no effect on reward |
+| `rollback_eval_callback.py` | `RollbackEvaluationCallbackTopK`, `SkippableTrainPPO` (new) | The checkpoint-rollback mechanism (thesis §4.2) |
 
-Several more reward-shaping wrappers are defined **inline inside `train_bace_clean.py` itself**
-(not in their own files), which is easy to miss: `HVAASurvivalEveryNStepsBonus`,
-`KillRewardWrapper`, `ActionSmoothnessPenalty`, `RangeClosingShaping` (unused),
-`FireCooldownWrapper`, `HeadingRateLimitWrapper`, `NanGuardWrapper`, plus two full alternative
-PPO implementations, `ExpertRolloutBuffer`/`ExpertMixPPO` (~370 lines) — **which are never
-instantiated anywhere in the codebase.** `main()` builds a vanilla `PPO(...)` (line ~2321), not
-`ExpertMixPPO`. This is a large, sophisticated, fully-dead alternative implementation of the
-same idea Factor E's `ExpertActionBlendingWrapper` implements more simply — don't spend time
-trying to trace it into the live training path, it isn't there.
+`hvaa_destruction_penalty.py` — previously listed here as dead code (neither class was ever
+instantiated) — **has been deleted entirely**, per §5.4.
 
-### 2.3 The actual wrapper stack, in order (as built by `make_env()`)
+`SkippableTrainPPO` (new, `rollback_eval_callback.py`) is a small `PPO` subclass
+`train_bace_clean.py` now instantiates instead of vanilla `PPO`. It replaces what used to be a
+`model.train` monkey-patch (`RollbackEvaluationCallbackTopK._init_callback` reassigning
+`self.model.train` to a wrapped closure) with a normal method override
+(`skip_next_n_train_calls(n)` sets an instance counter; `train()` checks it and either no-ops or
+calls `super().train()`). This is the fix for the `model.save()` pickling crash documented in
+§5.2b — see that section for why the monkey-patch broke saving in the first place.
+
+### 2.3 The actual wrapper stack, in order (as built by `env_factory.build_env()`)
 
 This is the order environment `.step()` calls actually propagate through — reward
-contributions accumulate bottom-to-top relative to this list (innermost/first-applied at top):
+contributions accumulate bottom-to-top relative to this list (innermost/first-applied at top).
+**Both `train_bace_clean.py` and `evaluate_experiment_seeds.py` now build this exact same
+stack** by calling the one shared `env_factory.build_env(bace_config, is_eval, ...)` function —
+see §5.3 for what this changed relative to how evaluation used to work.
 
 1. `SingleAgentBACEEnv` — collapses the multi-agent PettingZoo env to one Gym `Env` (see §2.4 for why this matters for 2v2)
-2. `EnrichedObservationWrapper` + `SplitNormalizationWrapper` *(only if `--use-enriched-obs`)*
+2. `EnrichedObservationWrapper` + `SplitNormalizationWrapper` *(only if `--use-enriched-obs`; at eval time, `SplitNormalizationWrapper` is only added if the checkpoint being evaluated actually used it — see `apply_split_normalization` in `env_factory.py`, for compatibility with older/legacy checkpoints trained before split normalization existed)*
 3. `HeadingRateLimitWrapper`
 4. `KillRewardWrapper`
 5. `ActionSmoothnessPenalty`
@@ -140,12 +169,22 @@ contributions accumulate bottom-to-top relative to this list (innermost/first-ap
 8. `CombinedTrackAwareShaping`
 9. `FireCooldownWrapper`
 10. `HVAASurvivalEveryNStepsBonus`
-11. `ExpertAlignmentWrapper` *(only if `--expert-alignment`, training env only)*
-12. `ExpertActionBlendingWrapper` *(only if `--expert-blending`, training env only)*
+11. `ExpertAlignmentWrapper` *(only if `--expert-alignment`, training env only — correctly skipped at eval, this was always intentional)*
+12. `ExpertActionBlendingWrapper` *(only if `--expert-blending`, training env only — same)*
 13. `CompactRewardLogger`
 14. `NanGuardWrapper`
 15. `Monitor` (SB3)
 16. `DummyVecEnv` → `VecNormalize`
+
+**Schedule-dependent wrappers at evaluation time:** `ActionSmoothnessPenalty` and
+`FireCooldownWrapper` (items 5 and 9) anneal their coefficients based on a `global_step` counter
+that only training's callback ever advances (via `env_method("set_global_step", ...)`).
+Evaluation has no such callback, so `env_factory.build_env()` accepts a
+`freeze_schedule_at_step` argument; `evaluate_experiment_seeds.py` passes
+`env_factory.FULLY_ANNEALED_STEP` (a constant past both schedules' anneal windows) so evaluation
+reflects the trained policy's realistic, fully-annealed final discipline (full smoothness
+penalty, mature fire-cooldown discipline) rather than each schedule's un-annealed step-0 starting
+values, which evaluation would otherwise never advance past.
 
 ### 2.4 `Godot_Air_Combat/` — the B-ACE simulation (Godot 4.5)
 
@@ -216,9 +255,11 @@ pattern already used for `blue_pk`/`red_pk`/`blue_killed_total` in `SimManager.g
 `_get_info_from_agents()`; (3) decide whether you want evasion credit purely through the
 existing uplink/pitbull geometry, or want to add an explicit Pk-vs-geometry formula at
 intercept — the former is "free" (already modeled, just not observable/rewarded), the latter
-requires new Godot code; (4) add a matching reward-shaping term (a new small wrapper following
-the `hvaa_destruction_penalty.py` pattern) once the signal exists, and a matching evaluation
-metric (following the exact pattern `evaluate_experiment_seeds.py` already uses for
+requires new Godot code; (4) add a matching reward-shaping term (a new small `gym.Wrapper`
+following the pattern of the other reward-shaping wrappers in `rl_files/env_factory.py`, e.g.
+`KillRewardWrapper` — `hvaa_destruction_penalty.py`, previously a template for this, has since
+been deleted as dead code, see §5.4) once the signal exists, and a matching evaluation metric
+(following the exact pattern `evaluate_experiment_seeds.py` already uses for
 `red_killed`/`blue_killed` via `EpisodeData`).
 
 ### 3.2 Extending to 2v2 Multi-Agent RL
@@ -235,8 +276,10 @@ editor fallback, not proof the RL pipeline has been exercised at 2v2).
 
 **Where the single-agent assumption is actually baked in — this is what you have to change:**
 
-1. **`SingleAgentBACEEnv`** (defined near-identically in both `train_bace_clean.py` and
-   `evaluate_experiment_seeds.py`) is the real blocker, not the Godot side. Its `step()`
+1. **`SingleAgentBACEEnv`** (now defined once, in `rl_files/env_factory.py` — previously
+   duplicated near-identically in both `train_bace_clean.py` and
+   `evaluate_experiment_seeds.py`, since consolidated, see §2.2) is the real blocker, not the
+   Godot side. Its `step()`
    broadcasts the *one* action from the single PPO policy identically to every agent in the
    underlying multi-agent env (`{agent: clipped for agent in self._ma_env.agents}`) — for two
    independently-controlled blue aircraft this is simply wrong, both would fly identical
@@ -249,8 +292,8 @@ editor fallback, not proof the RL pipeline has been exercised at 2v2).
    extensions, RLlib, etc.) built around the existing PettingZoo interface directly.
 2. **Every reward-shaping wrapper that assumes exactly one enemy track / one protected asset**
    (this is the majority of them): `track_aware_shaping.py`'s `track_idx`/`range_idx` scalar
-   indices, `mission_tempo_shaping_perstep.py`/`hvaa_destruction_penalty.py`'s single boolean
-   `red_killed_event`/`hvaa_alive` gates. These need either a redesigned per-track schema with
+   indices, `mission_tempo_shaping_perstep.py`'s single boolean `red_killed_event`/`hvaa_alive`
+   gates. These need either a redesigned per-track schema with
    aggregation logic (e.g., "nearest threat" or "most dangerous threat"), or N wrapper
    instances with an explicit combination rule that doesn't exist today.
 3. **The expert wrappers and scripted FSM** (`expert_alignment_wrapper.py`,
@@ -287,58 +330,90 @@ and `rollback_eval_callback.py`'s evaluation loops last, once the training side 
 
 ## 4. Environment Setup
 
+**This section has been fully executed end-to-end on this machine (Windows, Godot 4.5.2,
+Python 3.13) as part of writing this guide** — not just researched. `bin/B_ACE_v0.1.exe`
+now exists, `.venv/` now exists with all dependencies installed, and a real training run
+was confirmed to complete cleanly (env connects, full episodes run, model checkpoint +
+`VecNormalize` stats + results JSON all save successfully). Three real, previously-undetected
+bugs (found only by actually running the pipeline, not by reading the code) were fixed along
+the way — see the end of this section and §5.2b. Nothing else in the codebase was changed.
+
 There is **no `requirements.txt`, `pyproject.toml`, `setup.py`, or root `README`** anywhere in
-this repository, and no automated tests or CI configuration. Everything below was reconstructed
-from imports/config files, not from an in-repo setup script — expect to iterate.
+this repository, and no automated tests or CI configuration, so none of this was discoverable
+from an in-repo setup script.
 
-### 4.1 Godot side
+### 4.1 Godot side — done
 
-1. Install **Godot Engine 4.5** (confirmed via `project.godot`'s `config/features=PackedStringArray("4.5")`
-   and the presence of `.gd.uid` sidecar files, which Godot only auto-generates from 4.4+).
-   Get it from the official Godot site — do not use an older 4.x or a 3.x build, the project
-   will not open correctly.
-2. Open `Godot_Air_Combat/project.godot` in the editor once, so Godot can regenerate its local
-   `.godot/` import cache (this directory is gitignored and must be rebuilt locally).
-3. **You need to export a native binary — the repo does not ship one, and `bin/` does not
-   exist yet.** `train_bace_clean.py`'s `_resolve_env_path()` expects, on Windows specifically:
-   `<repo_root>/bin/B_ACE_v0.1.exe`.
-4. **There is no Windows export preset in this project.** `export_presets.cfg` only defines
-   `macOS` and `Linux` presets (consistent with the thesis's own statement that all experiments
-   were run on an Apple M3 MacBook). In the Godot editor: **Project → Export... → Add... →
-   Windows Desktop**, configure it (you'll need to download the Godot export templates matching
-   your 4.5 install, via Editor → Manage Export Templates if prompted), then **Export Project**,
-   saving to `bin/B_ACE_v0.1.exe` relative to the repo root. Export as a release/non-debug
-   build for training throughput.
-5. Do this *before* trying to run any Python training script — `train_bace_clean.py` will raise
-   a clear `FileNotFoundError` telling you exactly which path it checked and failed to find if
-   you skip this step.
+1. **Godot Engine 4.5.2** was used (matches `project.godot`'s declared
+   `config/features=PackedStringArray("4.5")` exactly). You also have Godot 4.6.2 downloaded;
+   I deliberately used 4.5.2 instead to avoid any risk of a minor-version behavior change
+   silently affecting this thesis's carefully-tuned GDScript. Executable used:
+   `C:\Users\kyle2\Downloads\Godot_v4.5.2-stable_win64.exe\Godot_v4.5.2-stable_win64.exe`.
+2. Ran a headless import pass once (`godot --headless --path Godot_Air_Combat --import --quit`)
+   to generate the local `.godot/` cache — equivalent to opening the project in the editor once.
+3. **Downloaded and installed the official Godot 4.5.2 export templates** (~1.35 GB, from
+   Godot's official GitHub releases) into
+   `%APPDATA%\Godot\export_templates\4.5.2.stable\` — this wasn't present and is required for
+   any export to work.
+4. **Added a Windows Desktop export preset** to `Godot_Air_Combat/export_presets.cfg` (only
+   `macOS` and `Linux` presets existed before — consistent with the thesis being built on a
+   Mac). This is a project-config edit, not GDScript logic.
+5. **Exported the release binary headlessly**
+   (`godot --headless --path Godot_Air_Combat --export-release "Windows Desktop" bin/B_ACE_v0.1.exe`),
+   producing `bin/B_ACE_v0.1.exe` (96 MB) + `bin/B_ACE_v0.1.pck`, at exactly the path
+   `train_bace_clean.py`'s `_resolve_env_path()` expects on Windows. Verified as a valid PE32+
+   executable.
 
-### 4.2 Python side
+**If you ever need to re-export** (e.g. after a GDScript change): re-run step 5's command from
+the repo root, or use the editor (**Project → Export... → Windows Desktop → Export Project**)
+now that the preset exists.
 
-No pinned versions exist in-repo, so the following is inferred from actual code usage, not
-guaranteed-exact:
+### 4.2 Python side — done
 
-- **Python 3.10+** is required — `train_bace_clean.py` uses PEP 604 union-type syntax
-  (`int | None` in a function signature), which is a hard 3.10 floor.
-- Install:
+- **Python 3.13.14** (already on this machine) — well above the 3.10 floor
+  `train_bace_clean.py` requires (it uses PEP 604 `int | None` syntax).
+- Created a virtual environment at `<repo_root>/.venv/` and installed:
   ```
-  pip install gymnasium pettingzoo numpy scipy torch stable-baselines3 tensorboard
+  pip install -r requirements.txt
   ```
-  (`tensorboard` is needed because `train_bace_clean.py` configures an SB3 logger with the
-  `"tensorboard"` output format.) **Do not** additionally install the `godot-rl-agents` PyPI
-  package — this repo reimplements its own minimal socket client
-  (`b_ace_py/godot_env.py`) rather than depending on that library; installing it isn't
-  necessary and isn't imported anywhere.
-- Note the gap called out in §4.1 below: no hyperparameter-search (Optuna) script and no
-  plotting/analysis code (matplotlib/pandas/etc.) exist anywhere in this repo, despite both
-  being extensively described in the thesis. If you need either, you'll be writing them
-  yourself around the existing training/eval scripts.
+  **Update: `requirements.txt` now exists at the repo root** (it didn't when this section was
+  originally written — see the rest of this note for what it pins). It pins exactly the versions
+  confirmed working below: `gymnasium 1.3.0`, `pettingzoo 1.27.0`, `numpy 2.5.2`, `scipy 1.18.0`,
+  `torch 2.13.0+cpu`, `stable-baselines3 2.9.0`, `tensorboard 2.21.0`, plus `tqdm`+`rich` (needed
+  for SB3's `progress_bar=True`, which `train_bace_clean.py` always passes to `model.learn()` —
+  not in the base `stable-baselines3` install, only in its `[extra]` extra), `pytest` (for
+  `tests/`, see §4.6), and `pyyaml` (for `run_from_config.py`, see §4.5). All import cleanly; no
+  version-compatibility problems encountered. **Did not** install the `godot-rl-agents` PyPI
+  package — this repo reimplements its own minimal socket client (`b_ace_py/godot_env.py`)
+  instead of depending on that library.
+- To activate this environment yourself: `source .venv/Scripts/activate` (Git Bash) or
+  `.venv\Scripts\Activate.ps1` (PowerShell).
+- Optional, not in `requirements.txt` by default (commented out there, install manually if
+  wanted): `wandb` (opt-in training-dashboard mirror, see §4.5), `streamlit`+`matplotlib`+
+  `pandas` (the local results dashboard, `tools/dashboard.py`, see §4.5).
+- Still missing, confirmed absent repo-wide: a hyperparameter-search (Optuna) script. If you
+  need one, you're writing it yourself around the existing training/eval scripts. (Plotting/
+  analysis code — previously also missing — now exists: `tools/dashboard.py`, see §4.5.)
 
-### 4.3 Running it
+### 4.3 Running it — verified commands
+
+**One required environment variable on Windows**, confirmed necessary by an actual crash (see
+§5.2b): several files in this codebase `print()` emoji characters, which raises
+`UnicodeEncodeError` under Windows' default (non-UTF-8) console codepage and kills the process.
+Set this once per shell session before running anything:
+
+```powershell
+# PowerShell
+$env:PYTHONUTF8 = "1"
+```
+```bash
+# Git Bash
+export PYTHONUTF8=1
+```
+
+Then, from the repo root, with `.venv` activated:
 
 ```bash
-# From the repo root, with the Godot binary already exported to bin/B_ACE_v0.1.exe
-
 # Single training run (uses SimpleExample_B_ACE_config.json by default):
 python rl_files/train_bace_clean.py --total-timesteps 10000000 --experiment-name my_test
 
@@ -355,7 +430,15 @@ python rl_files/run_experiment.py --experiment-name factorB_D --seeds 42 123 456
 python rl_files/evaluate_experiment_seeds.py --experiment-dir runs_sb3/factorB_D --episodes 200
 ```
 
-Important gotchas confirmed during the audit, not documented anywhere in-code:
+**Confirmed working end-to-end**: a 512-timestep smoke run (`--total-timesteps 512 --n-steps 256
+--batch-size 64 --epochs 1`) completed with zero errors after the fixes below — Godot launched,
+the socket connected, the config was accepted, 27-dim observations and their labels came back
+correctly, multiple full episodes ran (terminating on `All_Blue_Destroyed` as expected), PPO
+trained, a 20-episode hand-rolled final evaluation ran, and the model checkpoint (`.zip`),
+`VecNormalize` stats (`.pkl`), and `training_results_seed<N>.json` all saved to
+`runs_sb3/<run_name>/`. A real ~10M-timestep run should behave the same way, just much longer.
+
+Other gotchas confirmed during setup, not documented anywhere in-code:
 - `run_experiment.py` has **no default for `--total-timesteps`** of its own — it silently
   inherits `train_bace_clean.py`'s default of 1,000,000, which is 10x too small to reproduce
   anything resembling the thesis's results. Always pass `--total-timesteps` explicitly.
@@ -366,7 +449,87 @@ Important gotchas confirmed during the audit, not documented anywhere in-code:
   Reward/observation-mode metadata is not saved anywhere that `evaluate_experiment_seeds.py`
   reads back automatically — if you evaluate a model trained with a non-default
   `--ablation-config`, pass the *matching* `--ablation-config` to the eval script yourself, or
-  it will silently reconstruct the wrong features for that checkpoint (see §4.1).
+  it will silently reconstruct the wrong features for that checkpoint (see §5.3).
+
+### 4.4 Code bugs found (only by actually running the pipeline) and fixed
+
+Everything else in this guide came from reading the code. These were invisible to static
+reading and only surfaced by executing the real training script — each one *fully blocked*
+some part of the pipeline before the fix. Full technical detail in §5.2b.
+
+1. **`b_ace_py/B_ACE_GodotPettingZooWrapper.py`** — `__init__` crashed with
+   `KeyError: 'action_spaces'` on every single invocation, before an environment could even be
+   constructed. A redundant, wrongly-keyed line was reassigning `self.action_spaces` from a
+   dict key that doesn't exist; `self.action_spaces` was already correctly populated as a side
+   effect of the `_get_env_info()` call one line above it. Fix: deleted the redundant line.
+2. **`rl_files/rollback_eval_callback.py`** — `model.save()` crashed with
+   `TypeError: cannot pickle '_thread.lock' object` at the very end of every training run
+   (meaning, in a real full-length run, **no checkpoint could ever be written**, including the
+   periodic best-model checkpoints this same callback is responsible for saving *during*
+   training). Root cause: the callback monkey-patches `model.train` during training and its
+   restore logic reassigned the bound method instead of removing the instance-level override,
+   leaving a `'train'` key in the model's `__dict__` whose value's `__self__` bypasses SB3's
+   save-exclusion filtering entirely, dragging in the live environment (and its socket
+   connection) at pickle time. Original fix: `_on_training_end` now `del`s the instance
+   attribute instead of reassigning it. **Superseded fix:** the monkey-patch itself has since
+   been replaced entirely by `SkippableTrainPPO`, a small `PPO` subclass (see §2.2) — the
+   post-rollback "skip N training updates" logic is now a normal method override, so
+   `model.__dict__` can no longer gain a stray `'train'` key at all, structurally, rather than
+   relying on cleanup code remembering to remove it.
+3. **`rl_files/train_bace_clean.py`** — the final summary print crashed with
+   `ValueError: -inf is not in list` whenever a run ends before its first periodic evaluation
+   (any run shorter than `eval_freq`, default 200,000 steps — exactly what any short test run
+   looks like). This happened *after* the model was already saved, but *before* the final
+   `training_results_seed<N>.json` was written, so that file was silently never produced. Fix:
+   guarded the summary print with a check for whether any evaluation actually ran.
+
+A fourth bug of this same "only visible by running it" kind was found later, while building the
+observation-label contract check described in §4.6:
+`b_ace_py/pursuit_evasion_features.py::compute_atddg_defense_features` called `np.cross()` on
+two 2D vectors, which NumPy 2.0+ no longer accepts (this used to implicitly return the
+2D cross-product's scalar z-component; newer NumPy requires exactly 3D vectors). This crashed
+`--use-enriched-obs` training/eval the first time this exact code path executed. Fix: replaced
+with the equivalent explicit scalar formula (`a[0]*b[1] - a[1]*b[0]`) — same math, no `np.cross`
+dependency.
+
+### 4.5 New tooling (added since the sections above were written)
+
+Two follow-on improvement plans (`IMPROVEMENT_PLAN_1_VISUALIZATION_AND_RUNNING.md`,
+`IMPROVEMENT_PLAN_2_WRAPPERS_AND_DEPENDENCIES.md`, both at the repo root) added the following.
+None of it changes training/reward/observation behavior — see §5.3 for the one deliberate,
+approved exception (evaluation's wrapper stack now matches training's, where it used to
+silently differ).
+
+- **`--use-wandb` / `--wandb-project` / `--wandb-entity`** (opt-in, default off) on
+  `train_bace_clean.py` (and forwarded through `run_experiment.py`) mirror the same TensorBoard
+  scalars to a Weights & Biases run via `sync_tensorboard=True`. `wandb` is only imported if the
+  flag is passed; training without it is unaffected.
+- **`tools/dashboard.py`** — a local Streamlit results-browsing dashboard
+  (`streamlit run tools/dashboard.py`) that reads only existing output files (`monitor.csv`,
+  `training_results_seed<N>.json`) — reward-vs-timestep curves, evaluation-summary with a
+  confidence band, and a hyperparameter-config table, for one or more selected runs. No cloud
+  account needed; complements, doesn't replace, TensorBoard/W&B.
+- **`configs/*.yaml` + `rl_files/run_from_config.py`** — a declarative way to save and re-launch
+  a specific run configuration (`python rl_files/run_from_config.py configs/factor_BD.yaml`).
+  YAML keys must equal a real `train_bace_clean.py` flag's argparse `dest` name; an unrecognized
+  key errors immediately. Five example configs ship in `configs/`, matching the factor table in
+  `HOW_TO_RUN.md`. `--dry-run` prints the constructed command without running it.
+- **`tools/equivalence_check.py`** — the regression tool built to verify all of the above (and
+  the wrapper-stack consolidation in §2.2/§2.3) didn't change training behavior. Captures the
+  wrapper-stack's structure (class names, order, config) for a given CLI-flag combination and
+  diffs it against a saved baseline (`baselines/*.json`) — structural mismatches are a hard
+  failure; trajectory-value differences are informational-only, since Godot's spawn-position
+  randomization is not reproducible run-to-run even with a fixed seed (confirmed: the `--seed`
+  CLI flag never actually reaches Godot's `EnvConfig.seed`).
+
+### 4.6 Tests
+
+`tests/test_env_factory_regression.py` (run with `pytest`, or `pytest -m "not slow"` to skip the
+two tests that launch a real Godot instance) — a minimal regression suite added specifically
+because two of the four bugs in §4.4 would have been caught by an automated test if one had
+existed. Confirmed by temporarily reintroducing the original `KeyError: 'action_spaces'` bug and
+verifying the test catches it (then reverting). Also verifies `RollbackEvaluationCallbackTopK`
+rejects a non-`SkippableTrainPPO` model at `_init_callback` time (fail-fast, no Godot needed).
 
 ---
 
@@ -480,9 +643,72 @@ to nail down, ideally against whatever launch logs or scripts exist outside this
   would raise `AttributeError` if anyone ever instantiated `B_ACE_GodotPettingZooWrapper`
   directly and read that attribute before wrapping it.
 
+### 5.2b Runtime-only bugs found by actually executing the pipeline (now fixed in this checkout)
+
+Everything else in this document came from reading code. These were invisible to static
+reading — they only surfaced by actually running `train_bace_clean.py` end-to-end on a real
+Godot connection — and each one **fully blocked** part of the pipeline. All are now fixed in
+this checkout; described here for completeness and in case you're diffing against an upstream
+copy of this repo.
+
+1. **`b_ace_py/B_ACE_GodotPettingZooWrapper.py::__init__` — `KeyError: 'action_spaces'`, on
+   every construction, no exceptions.** The parent class's `_get_env_info()`
+   (`b_ace_py/godot_env.py`) already populates `self.action_spaces` (plural, a list of
+   `gymnasium.spaces.Dict`) as a side effect while it runs, and returns the *raw* dict from
+   Godot, whose key is `"action_space"` (**singular** — confirmed directly from Godot's actual
+   wire response: `action space {'input': {'action_type': 'continuous', 'size': 4}}`).
+   `B_ACE_GodotPettingZooWrapper.__init__` then had a redundant, wrongly-keyed line,
+   `self.action_spaces = env_info["action_spaces"]` (plural key that was never set on that
+   dict), immediately clobbering the correctly-populated attribute with a `KeyError`. **Fix:**
+   deleted that one line; `self.action_spaces` was already correct from the inherited call.
+2. **`rl_files/rollback_eval_callback.py::RollbackEvaluationCallbackTopK` —
+   `TypeError: cannot pickle '_thread.lock' object` inside every `model.save()` call, including
+   the periodic best-checkpoint saves this same callback performs *during* training — meaning a
+   real full-length run could complete all its training and still end up with **zero usable
+   saved checkpoints**.** `_init_callback()` monkey-patches `self.model.train = wrapped_train`,
+   a closure that captures the callback instance (and, transitively, the eval `VecEnv`, which
+   wraps a live Godot TCP socket). `_on_training_end()` was supposed to undo this
+   (`self.model.train = self._original_train_fn`), but *reassigning* the attribute still leaves
+   a `'train'` key in `self.model.__dict__` whose value is a bound method — and pickling a bound
+   method requires pickling its `__self__`, i.e. the entire live model object, which completely
+   bypasses Stable-Baselines3's `_excluded_save_params()` filtering (the mechanism that normally
+   keeps unpicklable things like `env` out of a saved checkpoint) and drags in the socket
+   connection several layers down. Confirmed root cause with a monkeypatched diagnostic script
+   that intercepted SB3's `data_to_json` and probed every model attribute individually — the
+   offending key was unambiguously `'train'`. **Fix:** `_on_training_end()` now does
+   `del self.model.__dict__["train"]` instead of reassigning, so the instance-level override is
+   fully removed and attribute access falls back to the normal class method.
+3. **`rl_files/train_bace_clean.py::main()` — `ValueError: -inf is not in list` in the final
+   summary print, whenever a run ends before its first periodic evaluation** (any run shorter
+   than `eval_freq`, 200,000 steps by default — which is exactly what any short test/smoke run
+   looks like, but *not* a real ~10M-step run, where dozens of evaluations occur). This crash
+   happens after the model checkpoint is already saved, but *before*
+   `training_results_seed<N>.json` is written, so that file silently never gets produced.
+   **Fix:** guarded the "Found at: N steps" print with a check for whether
+   `eval_summary["mean_rewards"]` is non-empty and actually contains `best_mean_reward`
+   (it stays at its `-inf` sentinel, and the list stays empty, if no periodic evaluation ran).
+4. **`b_ace_py/pursuit_evasion_features.py::compute_atddg_defense_features` — `ValueError: Both
+   input arrays must be (arrays of) 3-dimensional vectors`, the first time this code path
+   executed under `--use-enriched-obs`.** `np.cross(AT_unit, AD_vec)` was called on two 2D
+   vectors to get the perpendicular-distance scalar (the 2D cross product's implicit
+   z-component) — NumPy 2.0 removed `np.cross`'s support for non-3D inputs. Found while building
+   the observation-label contract check (§4.6) and running a real `--use-enriched-obs` training
+   smoke test. **Fix:** replaced with the equivalent explicit formula,
+   `AT_unit[0]*AD_vec[1] - AT_unit[1]*AD_vec[0]` — identical math, no `np.cross` dependency.
+
+None of this changes anything about the reward-shaping/constant-mismatch findings elsewhere in
+this document (§5.1, §5.3-§5.6) — those are design/tuning issues, these were pure plumbing bugs
+that had nothing to do with reward values.
+
 ### 5.3 Train/evaluation mismatches (results from training may not reflect what gets reported)
 
-- `evaluate_experiment_seeds.py` reimplements `HVAASurvivalEveryNStepsBonus` and
+**Update: the two bullets below describing wrapper-stack drift are now fixed** —
+`evaluate_experiment_seeds.py` no longer reimplements any wrapper from scratch; it calls the
+same `env_factory.build_env()` function training uses (see §2.2/§2.3). Kept here, marked, for
+the historical record and because the specific numeric drift they document is exactly the kind
+of silent bug this repo is prone to without a shared wrapper-stack definition.
+
+- ~~`evaluate_experiment_seeds.py` reimplements `HVAASurvivalEveryNStepsBonus` and
   `FireCooldownWrapper` from scratch rather than importing the training versions, with
   **different parameters**: the survival bonus uses `every_n_steps=50, bonus=0.05` at eval vs.
   `every_n_steps=25, bonus=0.01` at training (≈2.5x the average per-step rate at eval); the fire
@@ -490,10 +716,22 @@ to nail down, ideally against whatever launch logs or scripts exist outside this
   (matters most when evaluating early checkpoints, since it enforces end-of-training discipline
   on a policy that was actually trained under a looser cooldown at that point). Net effect:
   **the "mean_reward"/AUC reported by the evaluation script is not pure `r_env`** — it still
-  includes at least one shaping term, at a different rate than training used.
-- `HeadingRateLimitWrapper` (a pure action-space transform, not reward shaping) is absent
+  includes at least one shaping term, at a different rate than training used.~~ **FIXED:**
+  evaluation now uses training's exact `FireCooldownWrapper`/`HVAASurvivalEveryNStepsBonus`
+  parameters (via the shared `build_env()`), annealed to their fully-trained end values (see the
+  "Schedule-dependent wrappers at evaluation time" note in §2.3) rather than a separate,
+  differently-tuned fixed configuration. **This is an intentional behavior change, made with
+  the repo owner's explicit approval**: evaluation numbers for checkpoints re-evaluated after
+  this fix will differ from numbers recorded before it (evaluation's reward now includes several
+  shaping terms it previously omitted entirely — see the next bullet).
+- ~~`HeadingRateLimitWrapper` (a pure action-space transform, not reward shaping) is absent
   entirely at evaluation — raw policy actions reach the simulator unfiltered, even though the
-  policy was trained assuming its outputs get rate-limited first.
+  policy was trained assuming its outputs get rate-limited first.~~ **FIXED** — evaluation's
+  stack now includes `HeadingRateLimitWrapper` and every other reward-shaping wrapper training
+  uses (`KillRewardWrapper`, `ActionSmoothnessPenalty`, `MissionTempoShapingPerStep`,
+  `SustainedTurnPenaltySimple`, `CombinedTrackAwareShaping`), which were all previously entirely
+  absent from evaluation. `ExpertAlignmentWrapper`/`ExpertActionBlendingWrapper` remain
+  correctly training-only (that was always intentional, not drift).
 - The observation-enrichment `ablation_config` used for a given checkpoint is not saved
   anywhere `evaluate_experiment_seeds.py` reads automatically; it guesses "which observation
   mode" a checkpoint used purely from total dimensionality via hardcoded thresholds
@@ -504,24 +742,43 @@ to nail down, ideally against whatever launch logs or scripts exist outside this
 
 ### 5.4 Dead code (large, could waste significant time if you try to trace it as "live")
 
-- `ExpertRolloutBuffer`/`ExpertMixPPO` in `train_bace_clean.py` (~370 lines) — a full alternative
-  PPO implementation with an imitation/behavioral-cloning loss and rollout-level expert-action
-  mixing. Never instantiated; `main()` builds vanilla `PPO`.
-- `hvaa_destruction_penalty.py` — both classes (`HVAADestructionPenalty`,
-  `HVAADestructionPenaltyWithDecay`) are imported but never instantiated.
-- `RewardBreakdownLogger` (the verbose diagnostic logger, as opposed to `CompactRewardLogger`
-  which *is* used) — imported, never instantiated. Its `DEFAULT_KEYS` also reference several
-  info-dict keys no currently-active wrapper actually emits, so re-enabling it today would
-  silently under-report several reward categories rather than error.
-- `Godot_Air_Combat/B_ACE.gd` — orphaned root-scene script, not referenced by any `.tscn`.
+**Update: every Python item below has been deleted from the codebase** (re-confirmed dead via a
+fresh repo-wide grep immediately before each deletion, and the training/eval pipeline was
+re-verified byte-identical in behavior afterward via `tools/equivalence_check.py` — see §4.5).
+Kept here as a historical record, in case you're diffing against an upstream copy of this repo
+or wondering why a symbol this document once mentioned no longer exists:
+
+- ~~`ExpertRolloutBuffer`/`ExpertMixPPO` in `train_bace_clean.py` (~370 lines) — a full
+  alternative PPO implementation with an imitation/behavioral-cloning loss and rollout-level
+  expert-action mixing. Never instantiated; `main()` builds vanilla `PPO`.~~ **Deleted.** This
+  was also the only "manual/alternative PPO implementation" in the repo, so its removal directly
+  answers "can we decouple from manual PPO" — there was nothing live to decouple from.
+- ~~`hvaa_destruction_penalty.py` — both classes (`HVAADestructionPenalty`,
+  `HVAADestructionPenaltyWithDecay`) are imported but never instantiated.~~ **Deleted** (whole
+  file removed).
+- ~~`RewardBreakdownLogger` (the verbose diagnostic logger, as opposed to `CompactRewardLogger`
+  which *is* used) — imported, never instantiated.~~ **Deleted**; `reward_breakdown_logger.py`
+  now contains only `CompactRewardLogger`.
 - Two of the three `aggressive_hunter_fixed.py` classes (`AggressiveHunterV3`,
-  `AggressiveHunterTunable`) — ~95% copy-pasted from the one that's actually used.
+  `AggressiveHunterTunable`) — ~95% copy-pasted from the one that's actually used. **Deleted**;
+  only `AggressiveHunterFixed` (and `get_default_obs_indices()`) remain. The module docstring,
+  which described constructor parameters (`fire_threshold`, `fire_cooldown`, `g_force`,
+  `turn_rate`) that don't actually exist on the real class (see §5.7), was also corrected as
+  part of this cleanup.
 - `pursuit_evasion_features.py`'s `compute_features_for_agent`/`get_feature_names`/
-  `extract_agent_state_from_obs`, and `enriched_observation_wrapper_ablation.py`'s
-  `FeatureOnlyWrapper`/`create_enriched_env`/`get_ablation_summary`/`print_ablation_matrix` —
-  all only exercised by each file's own `__main__` self-test block.
-- `RangeClosingShaping` (defined inline in `train_bace_clean.py`) — defined, never instantiated.
-- `DEBUG_HVAA_OBS` module-level flag in `train_bace_clean.py` — defined, never read.
+  `extract_agent_state_from_obs` — **deleted** (only exercised by the file's own `__main__`
+  self-test, confirmed unused elsewhere). `enriched_observation_wrapper_ablation.py`'s
+  `FeatureOnlyWrapper`/`create_enriched_env` — **deleted** for the same reason.
+  `get_ablation_summary`/`print_ablation_matrix` in the same file were **kept** (not dead by the
+  same standard): the file's own `__main__` self-test still calls them.
+- ~~`RangeClosingShaping` (defined inline in `train_bace_clean.py`) — defined, never
+  instantiated.~~ **Deleted.**
+- ~~`DEBUG_HVAA_OBS` module-level flag in `train_bace_clean.py` — defined, never read.~~
+  **Deleted.**
+
+**Not touched (out of scope for the Python-tooling refactor this update describes, still
+accurate as originally documented):**
+- `Godot_Air_Combat/B_ACE.gd` — orphaned root-scene GDScript, not referenced by any `.tscn`.
 - A stray docstring reference to a module `simple_aggressive_expert.py`
   (`expert_alignment_wrapper.py`) that doesn't exist anywhere in the repo — a renamed-module
   reference that was never updated (the live module is `aggressive_hunter_fixed.py`).
@@ -583,8 +840,10 @@ Worth knowing if you plan to extend or verify the observation-feature math. Cros
 
 ### 5.7 Code-quality / practice issues
 
-- **No `requirements.txt`/environment file, no automated tests, no CI configuration anywhere**
-  in the repository.
+- ~~**No `requirements.txt`/environment file, no automated tests, no CI configuration anywhere**
+  in the repository.~~ **Partially fixed:** `requirements.txt` now exists (§4.2) and a minimal
+  regression test suite exists (`tests/`, §4.6). No CI configuration exists yet — that would
+  need a CI provider decision (GitHub Actions, etc.) this repo doesn't currently have wired up.
 - **Bare or overly-broad `except` clauses that silently swallow errors** appear repeatedly:
   `load_b_ace_config()` prints and returns `None` on any failure rather than raising;
   `rollback_eval_callback.py` has bare `except:` (no exception type at all) around VecNormalize
@@ -592,20 +851,26 @@ Worth knowing if you plan to extend or verify the observation-feature math. Cros
   patterns that convert malformed data into silent defaults rather than surfacing a problem;
   most `set_global_step` propagation methods across the wrapper files end in
   `except Exception: pass`.
-- **Windows console portability risk:** `reward_breakdown_logger.py` prints emoji characters
-  (📊, 🎯) directly to stdout. Given the default Windows console codepage is frequently not
-  UTF-8, this can raise `UnicodeEncodeError` and crash a training run outright — directly
-  relevant if you're running this on Windows, as opposed to the macOS environment the thesis
-  itself was developed on.
+- **Windows console portability risk — confirmed, not just theoretical.** `reward_breakdown_logger.py`
+  and `rollback_eval_callback.py` (at least — likely more, not exhaustively grepped) print emoji
+  characters directly to stdout. This was hit for real during setup on this machine: with the
+  default Windows `cp1252` console codepage, `rollback_eval_callback.py`'s
+  `print(f"⏭️  Skipping initial evaluation...")` raised `UnicodeEncodeError` and killed
+  the run outright. **Workaround (no code change needed): set `PYTHONUTF8=1` in the environment
+  before running any script in this repo** — see §4.3. This is the macOS-vs-Windows gap you'd
+  expect, since the thesis itself was developed entirely on a Mac.
 - **Docstrings that describe different parameter names/values than the actual code**, in
-  multiple files: `aggressive_hunter_fixed.py`'s module docstring lists parameters
+  multiple files: ~~`aggressive_hunter_fixed.py`'s module docstring lists parameters
   (`fire_threshold`, `fire_cooldown`, `g_force`, `turn_rate`) that don't exist in the actual
   constructor at all (the real names are `fire_range_min/max`, `fire_cooldown_steps`,
-  `fire_cone`, `pursuit_gain`, `max_turn_rate`); `hvaa_destruction_penalty.py`'s docstring calls
-  its second class "HVAADestructionPenaltyAnnealed" when the real name is
-  `HVAADestructionPenaltyWithDecay`; `rollback_eval_callback.py`'s module docstring states
-  defaults for `entropy_decay_factor`/`freeze_vecnormalize_until_new_best` that don't match the
-  actual constructor signature.
+  `fire_cone`, `pursuit_gain`, `max_turn_rate`)~~ **fixed** as part of the §5.4 dead-code
+  cleanup (the docstring now describes the real constructor parameters); ~~`hvaa_destruction_penalty.py`'s
+  docstring calls its second class "HVAADestructionPenaltyAnnealed" when the real name is
+  `HVAADestructionPenaltyWithDecay`~~ **moot** — that whole file was deleted (§5.4).
+  **Still present, not touched:** `rollback_eval_callback.py`'s module docstring states defaults
+  for `entropy_decay_factor`/`freeze_vecnormalize_until_new_best` that don't match the actual
+  constructor signature (confirmed still true: docstring says `entropy_decay_factor` defaults to
+  0.5, the actual default is 0.7).
 - **The scripted expert's "Patrol" mode doesn't do what the thesis describes.** Thesis §3.4.1
   states patrol mode "commands a return to HVAA proximity ... and maintains station-keeping by
   flying toward the HVAA's position." The actual `AggressiveHunterFixed` third branch never
@@ -614,10 +879,12 @@ Worth knowing if you plan to extend or verify the observation-feature math. Cros
   absolute heading toward zero, unrelated to the HVAA's actual position.
 - **Substantial code duplication**: the observation-caching helper (`_cache_original_obs`/
   `_get_obs_for_expert`, ~150 lines) is copy-pasted near-verbatim between
-  `expert_alignment_wrapper.py` and `expert_action_blending_wrapper.py`; `HVAASurvivalEveryNStepsBonus`
-  and `FireCooldownWrapper` are independently redefined (with different parameters, per §5.3)
-  in both `train_bace_clean.py` and `evaluate_experiment_seeds.py` instead of living in one
-  shared module.
+  `expert_alignment_wrapper.py` and `expert_action_blending_wrapper.py` (not touched by the
+  refactor described in the banner at the top of this document — still an open item).
+  ~~`HVAASurvivalEveryNStepsBonus` and `FireCooldownWrapper` are independently redefined (with
+  different parameters, per §5.3) in both `train_bace_clean.py` and
+  `evaluate_experiment_seeds.py` instead of living in one shared module.~~ **Fixed** — both now
+  live only in `env_factory.py` (§2.2), imported by both scripts.
 - **Fragile unit handling in `Fighter.gd`'s altitude/pitch controller**: a raw altitude-error
   (in scaled Godot-meter units) is clamped directly into a pitch-angle-degree range with no
   explicit unit conversion or named gain constant — it only "works" because the current scale
@@ -636,15 +903,22 @@ Worth knowing if you plan to extend or verify the observation-feature math. Cros
 
 If you're extending this codebase rather than just reading about it, in priority order:
 
-1. `rl_files/train_bace_clean.py` — read `main()` and `make_env()` top to bottom; this is
-   where every wrapper gets wired together and is the one file you'll edit most.
-2. `Godot_Air_Combat/components/Fighter.gd` — `get_obs()`, `set_action()`,
+1. `rl_files/env_factory.py` — read `build_env()` top to bottom; this is where every wrapper
+   gets wired together now (both training and evaluation call it), and the file you'll edit if
+   you're changing what wrappers exist or their order/parameters.
+2. `rl_files/train_bace_clean.py` — read `main()`; this is what you'll edit for CLI flags,
+   hyperparameters, and PPO/callback configuration (it no longer builds the wrapper stack
+   itself — see #1).
+3. `Godot_Air_Combat/components/Fighter.gd` — `get_obs()`, `set_action()`,
    `process_manouvers_action()`, `launch_missile_at_target()`.
-3. `Godot_Air_Combat/components/Missile.gd` — the entire file is short enough to read in one
+4. `Godot_Air_Combat/components/Missile.gd` — the entire file is short enough to read in one
    sitting and is the crux of any missile-evasion work.
-4. `Godot_Air_Combat/SimManager.gd` — `_physics_process()`, `inform_state()`,
+5. `Godot_Air_Combat/SimManager.gd` — `_physics_process()`, `inform_state()`,
    `_get_info_from_agents()`.
-5. `b_ace_py/enriched_observation_wrapper_ablation.py` and `b_ace_py/pursuit_evasion_features.py`
-   — if you're touching Factors A/B/C.
-6. `Godot_Air_Combat/addons/godot_rl_agents/B_ACE_sync.gd` — if you're touching the
+6. `b_ace_py/enriched_observation_wrapper_ablation.py` and `b_ace_py/pursuit_evasion_features.py`
+   — if you're touching Factors A/B/C. If you change the raw observation vector's contents or
+   order on the Godot side, also update `b_ace_py/contracts.py`'s `EXPECTED_OBSERVATION_LABELS`
+   — it's checked against Godot's actual reported labels at every environment construction and
+   will raise a clear error if they no longer match (see §2.1, §4.5).
+7. `Godot_Air_Combat/addons/godot_rl_agents/B_ACE_sync.gd` — if you're touching the
    multi-agent protocol for 2v2.

@@ -35,7 +35,6 @@ from dataclasses import dataclass, asdict
 import numpy as np
 from scipy import stats
 
-import gymnasium as gym
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
@@ -68,12 +67,8 @@ if REPO_ROOT.as_posix() not in sys.path:
 print(f"Using REPO_ROOT: {REPO_ROOT}")
 
 from b_ace_py.utils import load_b_ace_config
-from b_ace_py.B_ACE_GodotPettingZooWrapper import B_ACE_GodotPettingZooWrapper
 
-from b_ace_py.enriched_observation_wrapper_ablation import (
-    EnrichedObservationWrapper,
-    SplitNormalizationWrapper
-)
+from env_factory import build_env, get_split_norm_wrapper_from_vec_env, FULLY_ANNEALED_STEP
 
 
 @dataclass
@@ -184,193 +179,6 @@ def t_distribution_ci(data: List[float], confidence: float = 0.95) -> Confidence
         method="t_distribution",
         std=std
     )
-
-
-class HVAASurvivalEveryNStepsBonus(gym.Wrapper):
-    def __init__(self, env, every_n_steps: int = 50, bonus: float = 0.05):
-        super().__init__(env)
-        self.every_n_steps = int(every_n_steps)
-        self.bonus = float(bonus)
-        self._t = 0
-
-    def reset(self, **kwargs):
-        self._t = 0
-        return self.env.reset(**kwargs)
-
-    def step(self, action):
-        obs, rew, terminated, truncated, info = self.env.step(action)
-        hvaa_alive = bool(info.get("hvaa_alive", True))
-        ##############################
-        # Apply bonus reward if HVAA is alive and on the correct timestep
-        ##############################
-        if hvaa_alive and (self._t % self.every_n_steps == 0):
-            rew = float(rew) + self.bonus
-        self._t += 1
-        return obs, rew, terminated, truncated, info
-
-
-class FireCooldownWrapper(gym.Wrapper):
-    def __init__(self, env, cooldown_steps: int = 120, fire_idx: int = 3, threshold: float = 0.5):
-        super().__init__(env)
-        self.cooldown_steps = int(cooldown_steps)
-        self.fire_idx = int(fire_idx)
-        self.threshold = float(threshold)
-        self._t = 0
-        self._last_fire_t = -10**9
-        self._prev_want_fire = False
-
-    def reset(self, **kwargs):
-        self._t = 0
-        self._last_fire_t = -10**9
-        self._prev_want_fire = False
-        return self.env.reset(**kwargs)
-
-    def step(self, action):
-        a = np.array(action, dtype=np.float32, copy=True)
-        want_fire = float(a[self.fire_idx]) > self.threshold
-        rising_edge = want_fire and (not self._prev_want_fire)
-        ##############################
-        # Allow firing only if cooldown period has elapsed since last fire
-        ##############################
-        if rising_edge and (self._t - self._last_fire_t) >= self.cooldown_steps:
-            a[self.fire_idx] = 1.0
-            self._last_fire_t = self._t
-        else:
-            a[self.fire_idx] = 0.0
-        self._prev_want_fire = want_fire
-        obs, rew, terminated, truncated, info = self.env.step(a)
-        self._t += 1
-        return obs, rew, terminated, truncated, info
-
-
-class EpisodeOverTerminatorWrapper(gym.Wrapper):
-    """Ends the Gymnasium episode when the underlying Godot sim reports episode_over."""
-    def step(self, action):
-        obs, rew, terminated, truncated, info = self.env.step(action)
-        ##############################
-        # Check if underlying environment signals episode is over
-        ##############################
-        if (not terminated) and (not truncated) and bool(info.get("episode_over", False)):
-            terminated = True
-            info = dict(info)
-            info["terminated_by_episode_over"] = True
-        return obs, rew, terminated, truncated, info
-
-
-class SingleAgentBACEEnv(gym.Env):
-    """SB3-compatible single-agent wrapper."""
-    metadata = {"render.modes": ["human"]}
-
-    def __init__(self, bace_config: Dict[str, Any], controlled_agent_id: str = "agent_0", max_episode_steps: int = 36000):
-        super().__init__()
-        self._max_episode_steps = max_episode_steps
-        self._elapsed_steps = 0
-        self._ma_env = B_ACE_GodotPettingZooWrapper(device="cpu", **bace_config)
-
-        self.observation_labels = getattr(self._ma_env, "observation_labels", None)
-        self.obs_map = getattr(self._ma_env, "obs_map", None)
-        self.observation_labels_flat = getattr(self._ma_env, "observation_labels_flat", None)
-
-        ##############################
-        # Expose helper method if available from multi-agent environment
-        ##############################
-        if hasattr(self._ma_env, "get_hvaa_indices"):
-            self.get_hvaa_indices = self._ma_env.get_hvaa_indices
-
-        obs_dict, _ = self._ma_env.reset()
-        self._last_obs_dict = obs_dict
-
-        self.obs_map = getattr(self._ma_env, "obs_map", self.obs_map)
-        self.observation_labels_flat = getattr(self._ma_env, "observation_labels_flat", self.observation_labels_flat)
-
-        agents = getattr(self._ma_env, "agents", [])
-        self.controlled_agent_id = controlled_agent_id if controlled_agent_id in agents else (agents[0] if agents else controlled_agent_id)
-
-        raw_obs = obs_dict.get(self.controlled_agent_id, next(iter(obs_dict.values())))
-        obs_vec = self._to_array(raw_obs)
-        self.observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=obs_vec.shape, dtype=np.float32)
-        self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
-
-    def _to_array(self, obj) -> np.ndarray:
-        ##############################
-        # Convert numpy arrays to float32
-        ##############################
-        if isinstance(obj, np.ndarray):
-            return obj.astype(np.float32)
-        ##############################
-        # Convert lists and tuples to numpy arrays
-        ##############################
-        if isinstance(obj, (list, tuple)):
-            return np.asarray(obj, dtype=np.float32)
-        ##############################
-        # Convert scalar values to arrays
-        ##############################
-        if isinstance(obj, (float, int)):
-            return np.asarray([obj], dtype=np.float32)
-        ##############################
-        # Handle nested dict structures
-        ##############################
-        if isinstance(obj, dict):
-            ##############################
-            # Recursively extract obs key if present
-            ##############################
-            if "obs" in obj:
-                return self._to_array(obj["obs"])
-            ##############################
-            # Try to extract first numeric value from dictionary
-            ##############################
-            for v in obj.values():
-                try:
-                    arr = self._to_array(v)
-                    ##############################
-                    # Return if extraction yields numeric array
-                    ##############################
-                    if arr.dtype.kind in ("f", "i"):
-                        return arr
-                except:
-                    continue
-        raise RuntimeError(f"Could not extract obs")
-
-    def _extract_single_obs(self, obs_dict):
-        raw = obs_dict.get(self.controlled_agent_id, next(iter(obs_dict.values())))
-        return self._to_array(raw)
-
-    def reset(self, *, seed=None, options=None):
-        super().reset(seed=seed)
-        self._elapsed_steps = 0
-        obs_dict, info_dict = self._ma_env.reset()
-        self._last_obs_dict = obs_dict
-        self.obs_map = getattr(self._ma_env, "obs_map", self.obs_map)
-        self.observation_labels_flat = getattr(self._ma_env, "observation_labels_flat", self.observation_labels_flat)
-        return self._extract_single_obs(obs_dict), info_dict.get(self.controlled_agent_id, {})
-
-    def step(self, action):
-        self._elapsed_steps += 1
-        clipped = np.clip(action, -1.0, 1.0).astype(np.float32)
-        action_dict = {agent: clipped for agent in getattr(self._ma_env, "agents", [self.controlled_agent_id])}
-
-        obs_dict, rew_dict, term_dict, trunc_dict, info_dict = self._ma_env.step(action_dict)
-        self._last_obs_dict = obs_dict
-
-        obs = self._extract_single_obs(obs_dict)
-        reward = float(rew_dict.get(self.controlled_agent_id, 0.0)) if isinstance(rew_dict, dict) else float(rew_dict)
-        terminated = bool(term_dict.get(self.controlled_agent_id, False) or term_dict.get("__all__", False)) if isinstance(term_dict, dict) else bool(term_dict)
-        truncated = bool(trunc_dict.get(self.controlled_agent_id, False) or trunc_dict.get("__all__", False)) if isinstance(trunc_dict, dict) else bool(trunc_dict)
-
-        ##############################
-        # Truncate episode if max steps reached
-        ##############################
-        if self._elapsed_steps >= self._max_episode_steps and not terminated:
-            truncated = True
-
-        return obs, reward, terminated, truncated, info_dict.get(self.controlled_agent_id, {})
-
-    def close(self):
-        ##############################
-        # Close underlying multi-agent environment if it has close method
-        ##############################
-        if hasattr(self._ma_env, "close"):
-            self._ma_env.close()
 
 
 class _DummyVecEnv:
@@ -1187,66 +995,54 @@ def evaluate_model(
         print(f"   VecNormalize saved with norm_obs={saved_norm_obs}")
         print(f"   → Using split normalization: {use_split_normalization}")
 
+    use_enriched_stack = obs_mode in ["enriched", "enriched_extended"]
+
     def make_env():
         def _thunk():
-            e = SingleAgentBACEEnv(bace_config=bace_cfg, controlled_agent_id="agent_0", max_episode_steps=14000)
-
-            ##############################
-            # Apply enriched observation wrapper if needed
-            ##############################
-            if obs_mode in ["enriched", "enriched_extended"]:
-                wrapper_kwargs = {
-                    'normalize_features': False,
-                    'smooth_threat_loss': True,
-                    'debug': False,
-                }
-                ##############################
-                # Add ablation config if specified
-                ##############################
-                if ablation_config:
-                    wrapper_kwargs['ablation_config'] = ablation_config
-
-                e = EnrichedObservationWrapper(e, **wrapper_kwargs)
-
-                ##############################
-                # Apply split normalization if training used it
-                ##############################
-                if use_split_normalization:
-                    base_obs_dim = e.original_obs_dim
-                    split_norm_wrapper = SplitNormalizationWrapper(e, base_obs_dim=base_obs_dim)
-
-                    ##############################
-                    # Load saved split normalization stats if available
-                    ##############################
-                    if split_norm_path and split_norm_path.exists():
-                        split_norm_wrapper.load(str(split_norm_path))
-                        split_norm_wrapper.training = False
-                        ##############################
-                        # Print information about loaded stats
-                        ##############################
-                        if verbose:
-                            print(f"   → Applied SplitNormalizationWrapper (base_dim={base_obs_dim})")
-                            print(f"   ✓ Loaded SplitNormalization stats from {split_norm_path.name}")
-                            print(f"     (count={split_norm_wrapper.count}, mean_range=[{split_norm_wrapper.obs_mean.min():.2f}, {split_norm_wrapper.obs_mean.max():.2f}])")
-                    else:
-                        split_norm_wrapper.training = False
-                        ##############################
-                        # Print warning if stats not found
-                        ##############################
-                        if verbose:
-                            print(f"   → Applied SplitNormalizationWrapper (base_dim={base_obs_dim})")
-                            print(f"   ⚠️ WARNING: No SplitNormalization stats found - using identity normalization!")
-                            print(f"     This may cause evaluation scores to differ significantly from training!")
-
-                    e = split_norm_wrapper
-
-            e = FireCooldownWrapper(e, cooldown_steps=120, fire_idx=3, threshold=0.5)
-            e = HVAASurvivalEveryNStepsBonus(e, every_n_steps=50, bonus=0.05)
-            e = EpisodeOverTerminatorWrapper(e)
-            return e
+            return build_env(
+                bace_cfg,
+                is_eval=True,
+                log_dir_str=str(model_path.parent / "eval_monitor"),
+                seed=eval_seed,
+                use_enriched_obs=use_enriched_stack,
+                ablation_config=ablation_config,
+                max_episode_steps=14000,
+                controlled_agent_id="agent_0",
+                apply_split_normalization=use_split_normalization,
+                freeze_schedule_at_step=FULLY_ANNEALED_STEP,
+            )
         return _thunk
 
     venv = DummyVecEnv([make_env()])
+
+    ##############################
+    # Load saved split normalization stats onto the SplitNormalizationWrapper that build_env()
+    # just constructed (only present when use_enriched_stack and use_split_normalization are
+    # both true -- see apply_split_normalization in env_factory.build_env)
+    ##############################
+    if use_enriched_stack and use_split_normalization:
+        split_norm_wrapper = get_split_norm_wrapper_from_vec_env(venv)
+        if split_norm_wrapper is not None:
+            ##############################
+            # Load saved split normalization stats if available
+            ##############################
+            if split_norm_path and split_norm_path.exists():
+                split_norm_wrapper.load(str(split_norm_path))
+                split_norm_wrapper.training = False
+                ##############################
+                # Print information about loaded stats
+                ##############################
+                if verbose:
+                    print(f"   ✓ Loaded SplitNormalization stats from {split_norm_path.name}")
+                    print(f"     (count={split_norm_wrapper.count}, mean_range=[{split_norm_wrapper.obs_mean.min():.2f}, {split_norm_wrapper.obs_mean.max():.2f}])")
+            else:
+                split_norm_wrapper.training = False
+                ##############################
+                # Print warning if stats not found
+                ##############################
+                if verbose:
+                    print(f"   ⚠️ WARNING: No SplitNormalization stats found - using identity normalization!")
+                    print(f"     This may cause evaluation scores to differ significantly from training!")
 
     ##############################
     # Create VecNormalize with settings matching training

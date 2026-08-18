@@ -1,0 +1,176 @@
+{
+   "EnvConfig":{
+      "task":"b_ace_v1",
+      "port":12600,
+      "renderize":1,
+      "phy_fps":20,
+      "speed_up":1,
+      "max_cycles":72000,
+      "experiment_mode":0,
+      "parallel_envs":1,
+      "seed":1,
+      "action_repeat":2,
+      "action_type":"Low_Level_Continuous",
+      "stop_mission":1,
+      "max_trail_size":180,
+      "RewardsConfig":{
+         "mission_factor":0.0001,
+         "missile_fire_factor":0.0,
+         "missile_no_fire_factor":-0.0001,
+         "missile_miss_factor":0.0,
+         "detect_loss_factor":-0.01,
+         "keep_track_factor":0.001,
+         "hit_enemy_factor":10.0,
+         "hit_own_factor":0.0,
+         "mission_accomplished_factor":8.0,
+         "hvaa_loss_factor": 0.0,
+         "hvaa_proximity_factor": 0.0001
+      },
+      "BlueSpawn": {
+         "mode": "random_disk",
+         "center": { "x": 0.0, "z": 50.0 },
+         "outer_radius": 3.0,
+         "inner_radius": 0.0,
+         "altitude": { "value": 25000.0 },
+         "min_sep": 4.0,
+         "heading_deg_range": [350.0, 355.0],
+         "speed_range_mps": [220.0, 260.0],
+         "respect_bounds": true},
+      "HVAASpawn": {
+         "mode": "random_rect",
+         "rect": {
+            "xmin": -2.0,
+            "xmax": 2.0,
+            "zmin": 47.0,
+            "zmax": 49.0
+         },
+         "altitude": { "value": 25000.0 },
+         "heading_deg_range": [160.0, 175.0],
+         "speed_range_mps": [270.0, 270.0],
+         "respect_bounds": true
+  }
+      },
+
+
+   "AgentsConfig":{
+      "blue_agents":{
+         "num_agents":1,
+         "share_states":1,
+         "share_tracks":1,
+         "base_behavior":"external",
+         "heuristic": "model",
+         "mission":"DCA",
+         "radar_hfov": [-90, 90],
+         "radar_vfov": [-20, 40],
+         "beh_config":{
+            "dShot":[
+               1.04,
+               0.50,
+               1.09
+            ],
+            "lCrank":[
+               1.06,
+               0.98,
+               0.98
+            ],
+            "lBreak":[
+               1.05,
+               1.17,
+               0.45
+            ]
+         },
+         "init_position":{
+            "x":0.0,
+            "y":25000.0,
+            "z":40.0
+         },
+         "offset_pos":{
+            "x":0.0,
+            "y":0.0,
+            "z":0.0
+         },
+         "init_hdg":0.0,
+         "target_position":{
+            "x":-25.0,
+            "y":25000.0,
+            "z":-80.0
+         },
+         "rnd_offset_range":{
+            "x":0.0,
+            "y":0.0,
+            "z":0.0
+         },
+         "rnd_shot_dist_var":0.025,
+         "rnd_crank_var":0.025,
+         "rnd_break_var":0.025,
+         "wez_models":"res://assets/wez/Default_Wez_params.json"
+      },
+      "red_agents":{
+         "num_agents":1,
+         "share_states":1,
+         "share_tracks":1,
+         "base_behavior":"baseline1",
+         "mission":"DCA",
+         "beh_config":{
+            "dShot":[
+               1.04,
+               0.50,
+               1.09
+            ],
+            "lCrank":[
+               1.06,
+               0.98,
+               0.98
+            ],
+            "lBreak":[
+               1.05,
+               1.17,
+               0.45
+            ]
+         },
+         "init_position":{
+            "x":0.0,
+            "y":25000.0,
+            "z":-60.0
+         },
+         "offset_pos":{
+            "x":0.0,
+            "y":0.0,
+            "z":0.0
+         },
+         "init_hdg":180.0,
+         "target_position":{
+            "x":0.0,
+            "y":25000.0,
+            "z":110.0
+         },
+         "rnd_offset_range":{
+            "x":0.0,
+            "y":0.0,
+            "z":0.0
+         },
+         "rnd_shot_dist_var":0.025,
+         "rnd_crank_var":0.025,
+         "rnd_break_var":0.025,
+         "wez_models":"res://assets/wez/Default_Wez_params.json"
+      },
+      "hvaa_agents": {
+         "num_agents": 1,
+         "missiles": 0,
+         "is_hvaa": true,
+         "base_behavior": "duck",
+         "heuristic": "AP",
+         "const_hdg_enable": true,
+         "const_speed": 275.0,
+         "target_position": {
+            "x": -80.0,
+            "y": 25000.0,
+            "z": -100.0
+         },
+         "offset_pos": {
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0
+         }
+   }
+}}

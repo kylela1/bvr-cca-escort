@@ -1,0 +1,9 @@
+# Design run "BD": Factor B (WEZ/DMC observation features) + Factor D (alignment-based reward
+# shaping) together.
+# Launch with: python rl_files/run_from_config.py configs/factor_BD.yaml
+experiment_name: BD_test
+total_timesteps: 10000000
+seed: 42
+use_enriched_obs: true
+ablation_config: engagement_only
+expert_alignment: true
