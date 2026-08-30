@@ -112,7 +112,6 @@ class B_ACE_GodotPettingZooWrapper(GodotEnv, ParallelEnv):
                     print(f"{i:>2}: {label}")
             print("=== End Observation Labels ===\n")
             self._printed_observation_labels = True
-        self.action_spaces = env_info["action_spaces"]
 
         self.tuple_action_spaces = [
             spaces.Tuple([v for _, v in action_space.items()]) for action_space in self.action_spaces

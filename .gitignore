@@ -12,6 +12,7 @@ env/
 
 # RL artifacts (big, regenerable)
 runs/
+runs_sb3/
 logs/
 tensorboard/
 wandb/
@@ -20,6 +21,9 @@ models/
 *.zip
 *.pt
 *.pth
+
+# Exported Godot binary (large, regenerable via export_presets.cfg)
+bin/
 
 # Godot
 .godot/

@@ -2512,7 +2512,21 @@ def main():
     ##############################
     model_path = log_dir / "ppo_bace_blue_lead"
     norm_path = log_dir / "vecnormalize.pkl"
-    model.save(model_path.as_posix())
+    ##############################
+    # The rollback callback's train-function monkey-patch (rollback_eval_callback.py's
+    # _init_callback/_on_training_end) can leave a non-picklable closure reachable from
+    # model.__dict__, which makes cloudpickle fail here with "cannot pickle '_thread.lock'
+    # object". The callback's own internal checkpoint saves already guard against this
+    # (see _save_best_checkpoint's try/except around this same call); mirror that guard here
+    # so a failed final save doesn't crash the whole script after training has already
+    # completed successfully. Policy weights remain available via the best/eval .pt
+    # checkpoints either way (evaluate_experiment_seeds.py falls back to those).
+    ##############################
+    try:
+        model.save(model_path.as_posix())
+    except Exception as e:
+        print(f"   ⚠️  Final full model save failed ({e}); "
+              f"policy weights remain available via best/eval .pt checkpoints.")
     vec_env.save(norm_path.as_posix())
 
     ##############################

@@ -658,7 +658,11 @@ class PursuitEvasionFeatures:
         projection = np.dot(AD_vec, AT_unit)
         
         # Perpendicular distance from defender to A-T line
-        perp_distance = np.abs(np.cross(AT_unit, AD_vec))
+        # NumPy 2.x removed the implicit 2D case from np.cross (previously computed this
+        # same scalar automatically for two 2D inputs); compute the z-component of the
+        # equivalent 3D cross product directly instead. Numerically identical to the old
+        # np.cross(AT_unit, AD_vec) behavior for 2D vectors.
+        perp_distance = np.abs(AT_unit[0] * AD_vec[1] - AT_unit[1] * AD_vec[0])
         
         # Geometric defensibility criteria:
         # 1. Defender should be able to reach intercept point before attacker reaches target
