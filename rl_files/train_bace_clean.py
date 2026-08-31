@@ -903,6 +903,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
   engagement_range    = B+C (ENGAGEMENT + RANGE_LIMITED)
 """
     )
+    parser.add_argument(
+        "--reward-mode",
+        type=str,
+        default="baseline",
+        choices=["baseline", "mission_aligned"],
+        help=(
+            "'baseline' (default) trains with the existing, unmodified reward stack. "
+            "'mission_aligned' zeroes MissionTempoShapingPerStep's per-step post-kill survival "
+            "bonus (see env_factory.py's MISSION_ALIGNED_REWARD_STACK for why) and adds "
+            "MissionOutcomeBonus (an explicit HVAA-loss penalty and a sized mission-success "
+            "bonus). See REWARD_SHAPING_STEPS_FORWARD.md for the full rationale."
+        ),
+    )
 
     parser.add_argument(
         "--enable-apollonius", dest="enable_apollonius", action="store_true", default=True,
@@ -1115,6 +1128,7 @@ def main():
                 blend_debug=args.blend_debug,
                 max_episode_steps=13_500,
                 controlled_agent_id="agent_0",
+                reward_mode=args.reward_mode,
             )
         return _thunk
 

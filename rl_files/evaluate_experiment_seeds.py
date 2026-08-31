@@ -116,6 +116,7 @@ class SeedResults:
     hvaa_survival_rate: float
     red_kill_rate: float
     blue_loss_rate: float
+    win_rate: float
     mean_length: float
     mean_blue_missiles: float
     mean_red_missiles: float
@@ -934,6 +935,7 @@ def evaluate_model(
     verbose: bool = True,
     strict_validation: bool = True,
     split_norm_path: Optional[Path] = None,
+    reward_mode: str = "baseline",
 ) -> List[EpisodeData]:
     """Run evaluation episodes for a single model."""
 
@@ -1010,6 +1012,7 @@ def evaluate_model(
                 controlled_agent_id="agent_0",
                 apply_split_normalization=use_split_normalization,
                 freeze_schedule_at_step=FULLY_ANNEALED_STEP,
+                reward_mode=reward_mode,
             )
         return _thunk
 
@@ -1189,6 +1192,12 @@ def compute_seed_results(episodes: List[EpisodeData], seed_name: str,
         hvaa_survival_rate=float(np.mean([ep.hvaa_survived for ep in episodes])),
         red_kill_rate=float(np.mean([ep.red_killed for ep in episodes])),
         blue_loss_rate=float(np.mean([ep.blue_killed for ep in episodes])),
+        # Win = the thesis's own definition: HVAA reaches its objective AND the CCA survives.
+        # Not the same as hvaa_survival_rate alone -- an episode where the HVAA "survives" only
+        # because the episode was cut short by the CCA's own destruction would not count as a
+        # win under this definition (it does under hvaa_survival_rate alone, since that only
+        # checks whether the HVAA specifically was destroyed by the time the episode ended).
+        win_rate=float(np.mean([ep.hvaa_survived and not ep.blue_killed for ep in episodes])),
         mean_length=float(np.mean([ep.length for ep in episodes])),
         mean_blue_missiles=float(np.mean([ep.blue_missiles_fired for ep in episodes])),
         mean_red_missiles=float(np.mean([ep.red_missiles_fired for ep in episodes])),
@@ -1209,6 +1218,7 @@ def compute_aggregate_results(seed_results: List[SeedResults]) -> Dict:
     seed_hvaa_rates = [sr.hvaa_survival_rate for sr in seed_results]
     seed_red_kill_rates = [sr.red_kill_rate for sr in seed_results]
     seed_blue_loss_rates = [sr.blue_loss_rate for sr in seed_results]
+    seed_win_rates = [sr.win_rate for sr in seed_results]
     seed_mean_lengths = [sr.mean_length for sr in seed_results]
     seed_blue_missiles = [sr.mean_blue_missiles for sr in seed_results]
     seed_red_missiles = [sr.mean_red_missiles for sr in seed_results]
@@ -1227,6 +1237,7 @@ def compute_aggregate_results(seed_results: List[SeedResults]) -> Dict:
             "hvaa_survival_rate": asdict(t_distribution_ci(seed_hvaa_rates)),
             "red_kill_rate": asdict(t_distribution_ci(seed_red_kill_rates)),
             "blue_loss_rate": asdict(t_distribution_ci(seed_blue_loss_rates)),
+            "win_rate": asdict(t_distribution_ci(seed_win_rates)),
             "mean_length": asdict(t_distribution_ci(seed_mean_lengths)),
             "mean_blue_missiles": asdict(t_distribution_ci(seed_blue_missiles)),
             "mean_red_missiles": asdict(t_distribution_ci(seed_red_missiles)),
@@ -1253,7 +1264,8 @@ def print_results(seed_results: List[SeedResults], aggregate: Dict):
 
     print(f"\n{'PER-SEED RESULTS':^90}")
     print("-"*90)
-    print(f"{'Seed':<12} {'Mean Reward':>14} {'Std':>10} {'HVAA %':>10} {'Red Kill %':>12} {'Blue Loss %':>12}")
+    print(f"{'Seed':<12} {'Mean Reward':>14} {'Std':>10} {'Win %':>9} {'HVAA %':>10} "
+          f"{'Red Kill %':>12} {'Blue Loss %':>12}")
     print("-"*90)
 
     ##############################
@@ -1261,6 +1273,7 @@ def print_results(seed_results: List[SeedResults], aggregate: Dict):
     ##############################
     for sr in sorted(seed_results, key=lambda x: x.seed_name):
         print(f"{sr.seed_name:<12} {sr.mean_reward:>14.2f} {sr.std_reward:>10.2f} "
+              f"{sr.win_rate*100:>8.1f}% "
               f"{sr.hvaa_survival_rate*100:>9.1f}% {sr.red_kill_rate*100:>11.1f}% "
               f"{sr.blue_loss_rate*100:>11.1f}%")
 
@@ -1287,6 +1300,7 @@ def print_results(seed_results: List[SeedResults], aggregate: Dict):
     print(f"{'Metric':<30} {'Mean ± HW':>25} {'95% CI':>25}")
     print("-"*90)
     print(f"{'Mean Reward':<30} {format_ci(cs['mean_reward'])}")
+    print(f"{'Win Rate':<30} {format_ci(cs['win_rate'], is_rate=True)}")
     print(f"{'HVAA Survival Rate':<30} {format_ci(cs['hvaa_survival_rate'], is_rate=True)}")
     print(f"{'Red Kill Rate':<30} {format_ci(cs['red_kill_rate'], is_rate=True)}")
     print(f"{'Blue Loss Rate':<30} {format_ci(cs['blue_loss_rate'], is_rate=True)}")
@@ -1365,6 +1379,12 @@ def parse_args():
                            'range_limited_only', 'geometry_engagement',
                            'geometry_range', 'engagement_range'],
                    help="Ablation configuration for enriched observations")
+    p.add_argument("--reward-mode", type=str, default="baseline",
+                   choices=["baseline", "mission_aligned"],
+                   help="Must match the --reward-mode the checkpoint was trained with, so the "
+                        "reported Mean Reward reflects the same reward composition training "
+                        "used. Mission-outcome metrics (HVAA survival, red kill, blue loss) are "
+                        "unaffected by this either way.")
 
     feature_group = p.add_argument_group("Feature Flags")
     feature_group.add_argument("--enable-apollonius", action="store_true", dest="enable_apollonius", default=None)
@@ -1733,6 +1753,7 @@ def main():
                     verbose=True,
                     strict_validation=not args.no_strict_validation,
                     split_norm_path=split_norm_path,
+                    reward_mode=args.reward_mode,
                 )
 
                 seed_result = compute_seed_results(episodes, seed_name, policy_path, vecnorm_path)
@@ -1899,6 +1920,7 @@ def main():
             verbose=True,
             strict_validation=not args.no_strict_validation,
             split_norm_path=split_norm_path,
+            reward_mode=args.reward_mode,
         )
 
         seed_result = compute_seed_results(episodes, seed_name, model_path, vecnorm_path)

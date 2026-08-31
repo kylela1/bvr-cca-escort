@@ -79,7 +79,12 @@ after the fact — see §5.3 for where to add it.
 
 ---
 
-## 4. Recommended architecture for your reward-redesign comparison
+## 4. Recommended architecture for your reward-redesign comparison — §4.1 and §4.3 IMPLEMENTED 2026-08-31
+
+**Update**: §4.1's reward-mode switch and §4.3's `win_rate` metric are now implemented (commit
+history on `new-code`), using item 1 of §4.2 as the first mission-aligned change, plus an
+additional new wrapper. The rest of this section is left as originally written for context;
+see the end of §4.4 below for exactly what shipped and how to use it.
 
 `env_factory.py`'s docstring makes the intent explicit: *"This is the ONLY place the wrapper
 stack is assembled."* Follow that same pattern for your contribution rather than editing the
@@ -178,6 +183,60 @@ comparisons (§6's scope question), you want your baseline-vs-mission-aligned ru
 want for any follow-on work (continued training, deployment, or your actual thesis building on
 this project's output). Confirming this fix holds under a real rollback-triggering run is worth
 doing once, deliberately, before treating it as settled.
+
+## 4.5 What was actually implemented (2026-08-31)
+
+**`env_factory.py`**: `build_env()` gained a `reward_mode: str = "baseline"` parameter.
+- `reward_mode="baseline"` uses `REWARD_SHAPING_STACK`, byte-for-byte unchanged — this is
+  exactly the reward `my_first_run` (Figure 1) already trained under.
+- `reward_mode="mission_aligned"` uses a new `MISSION_ALIGNED_REWARD_STACK`: identical to
+  baseline except `MissionTempoShapingPerStep`'s `bonus_per_step` is `0.0` instead of `0.006`
+  (§4.2 item 1 — the change Figure 5's arithmetic most directly targets; `penalty_per_step`
+  is kept, so urgency-to-engage pressure is unchanged, only the post-kill loitering incentive
+  is removed), plus a new `MissionOutcomeBonus` wrapper appended:
+  - `hvaa_loss_penalty=-15.0`, applied once the first time `info["hvaa_alive"]` is reported
+    False each episode (regardless of whether that also ends the episode — it currently often
+    doesn't, §2). **-15.0 is the thesis's own stated value for this exact term** (its r_env
+    equation), never actually wired up in this codebase until now.
+  - `mission_success_bonus=25.0`, applied once on an episode that ends with
+    `info["mission_success"]` True. Chosen so that finishing the mission (this + Godot's
+    existing +8 `mission_accomplished_factor` = 33 total) clearly exceeds the value of a single
+    kill (`KillRewardWrapper`'s +12 + Godot's +10 `hit_enemy_factor` = 22 total) by a
+    deliberate margin, not an arbitrary number.
+- Both terminal terms are implemented entirely in the Python wrapper layer — **no GDScript
+  edit, no Godot re-export**. This means §4.2 item 2 (fixing the termination bug on the Godot
+  side) is *not yet done* — this implementation works around its symptom (no penalty ever
+  applies to HVAA loss) without touching its cause (the episode not ending when it should).
+  That's still open if you want the termination logic itself to be correct, not just
+  compensated for.
+
+**CLI**: `--reward-mode {baseline,mission_aligned}` on both `train_bace_clean.py` and
+`evaluate_experiment_seeds.py` (the latter should be passed to match whatever the checkpoint
+being evaluated was trained with, so the reported Mean Reward reflects the right composition —
+mission-outcome metrics are unaffected either way).
+
+**`evaluate_experiment_seeds.py`**: `SeedResults` gained a `win_rate` field, computed per
+episode as `hvaa_survived and not blue_killed` (the thesis's own win definition — note this is
+*not* identical to `hvaa_survival_rate` alone: an episode where the CCA is destroyed but the
+HVAA happens not to have been by that point would count toward `hvaa_survival_rate` but not
+`win_rate`). Printed in both the per-seed table and the cross-seed aggregate summary,
+alongside the existing metrics.
+
+**Verified**: both `--reward-mode baseline` (unchanged behavior, confirmed byte-identical
+wrapper configuration and matching throughput) and `--reward-mode mission_aligned` (confirmed
+`[MISSION OUTCOME] -15.0 for HVAA destroyed` firing correctly in a live smoke test) run
+cleanly end-to-end. Not yet run at meaningful scale — that's the next step, not something to
+assume works well just because it runs without crashing.
+
+**Explicitly not done, and worth deciding on purpose rather than by default**: only one
+mission-aligned variant exists so far (the tempo-bonus fix + outcome bonus, combined). §4.2's
+recommendation to change one thing at a time was about isolating attribution *within* the
+mission-aligned design space if you build more variants — this first variant already combines
+two changes (killing the loitering bonus, adding outcome bonuses) because they're two sides of
+the same problem (Figure 5) and cheap to bundle for a first read. If the comparison against
+baseline looks promising, consider a follow-up variant with only one of the two changes to see
+which one is actually doing the work, before finalizing which mechanism to feature in the
+write-up.
 
 ## 5. Suggested order of attack
 

@@ -320,6 +320,67 @@ class KillRewardWrapper(gym.Wrapper):
         return obs, reward, term, trunc, info
 
 
+class MissionOutcomeBonus(gym.Wrapper):
+    """
+    One-time terminal rewards tied directly to mission outcome, used by reward_mode=
+    "mission_aligned" (see REWARD_SHAPING_STEPS_FORWARD.md Sec 4.2/4.4 for the full writeup).
+
+    Two gaps this closes, both entirely at the Python wrapper level (no Godot/GDScript change,
+    no re-export required):
+
+    1. HVAA loss currently goes unpenalized. `SimpleExample_B_ACE_config.json` sets
+       hvaa_loss_factor=0.0, and even if it didn't, `SimManager.gd`'s termination logic never
+       triggers the "HVAA_Destroyed" branch unless the CCA is *also* dead (CODEBASE_GUIDE.md
+       Sec 5.2) -- so an HVAA lost while the CCA survives currently applies no explicit penalty
+       at all. This wrapper applies one, the first time `hvaa_alive` is reported False each
+       episode, regardless of whether the episode actually ends at that moment. -15.0 is the
+       thesis's own stated magnitude for this term (Sec 3.2.3's r_env equation) -- present in
+       the intended design, never actually wired up in this codebase.
+    2. The one-time mission-success reward (Godot's mission_accomplished_factor, +8.0) is small
+       relative to what the per-step shaping terms it competes against can accumulate over a
+       long episode (REWARD_SHAPING_STEPS_FORWARD.md Sec 1 quantifies this: killing red early
+       and then loitering can out-earn efficient mission completion). This wrapper adds a
+       second, larger one-time bonus specifically on a successful mission-ending episode, sized
+       so that completing the mission is clearly worth more than any single kill (+12 from
+       KillRewardWrapper, +10 from Godot's hit_enemy_factor = 22 total) -- 8 (Godot) + 25
+       (here) = 33, a deliberate margin above 22, not an arbitrary round number.
+    """
+    def __init__(self, env, hvaa_loss_penalty: float = -15.0, mission_success_bonus: float = 25.0):
+        super().__init__(env)
+        self.hvaa_loss_penalty = float(hvaa_loss_penalty)
+        self.mission_success_bonus = float(mission_success_bonus)
+        self._hvaa_loss_applied = False
+
+    def reset(self, **kwargs):
+        self._hvaa_loss_applied = False
+        return self.env.reset(**kwargs)
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+
+        ##############################
+        # One-time penalty the first time the HVAA is reported destroyed this episode, whether
+        # or not that also ends the episode this step.
+        ##############################
+        if not self._hvaa_loss_applied and not info.get("hvaa_alive", True):
+            reward += self.hvaa_loss_penalty
+            self._hvaa_loss_applied = True
+            info["mission_outcome_hvaa_loss_penalty"] = self.hvaa_loss_penalty
+            print(f"[MISSION OUTCOME] {self.hvaa_loss_penalty} for HVAA destroyed")
+
+        ##############################
+        # One-time bonus on a successful mission-ending episode. mission_success is only
+        # populated at episode end (b_ace_py/contracts.py's EXPECTED_INFO_KEYS), so this can
+        # only ever fire on the terminating step.
+        ##############################
+        if (terminated or truncated) and info.get("mission_success", False):
+            reward += self.mission_success_bonus
+            info["mission_outcome_success_bonus"] = self.mission_success_bonus
+            print(f"[MISSION OUTCOME] +{self.mission_success_bonus} for mission success")
+
+        return obs, reward, terminated, truncated, info
+
+
 class ActionSmoothnessPenalty(gym.Wrapper):
     """
     Scheduled smoothness penalty (jerk + magnitude), increases over training.
@@ -628,6 +689,7 @@ def build_env(
     controlled_agent_id: str = "agent_0",
     apply_split_normalization: bool = True,
     freeze_schedule_at_step: Optional[int] = None,
+    reward_mode: str = "baseline",
 ) -> gym.Env:
     """
     Build one fully-wrapped B-ACE environment instance.
@@ -638,6 +700,16 @@ def build_env(
 
     Args:
         bace_config: the loaded B-ACE JSON scenario config (EnvConfig/AgentsConfig).
+        reward_mode: "baseline" (default) uses REWARD_SHAPING_STACK unchanged -- the exact
+            reward this codebase already trains with, unmodified, for reproducibility.
+            "mission_aligned" uses MISSION_ALIGNED_REWARD_STACK instead: the per-step
+            mission-tempo survival bonus is zeroed out (it currently pays more for loitering
+            with red dead than for finishing the mission -- see
+            REWARD_SHAPING_STEPS_FORWARD.md Sec 1 for the quantified argument) and
+            MissionOutcomeBonus is added (an explicit HVAA-loss penalty and a mission-success
+            bonus sized to matter -- Sec 4.2/4.4 of the same doc). Both modes share every other
+            wrapper unchanged, so a baseline-vs-mission-aligned comparison isolates exactly
+            this change.
         is_eval: if True, skips ExpertAlignmentWrapper/ExpertActionBlendingWrapper (Factors D/E
             are training-only techniques; evaluation always uses the raw learned policy).
         log_dir_str: directory Monitor writes monitor.csv into.
@@ -740,7 +812,68 @@ def build_env(
         )),
         (HVAASurvivalEveryNStepsBonus, dict(every_n_steps=25, bonus=0.01)),
     ]
-    for wrapper_cls, wrapper_kwargs in REWARD_SHAPING_STACK:
+
+    ##############################
+    # reward_mode="mission_aligned": identical to REWARD_SHAPING_STACK above except
+    # MissionTempoShapingPerStep's bonus_per_step is zeroed (see this function's docstring and
+    # REWARD_SHAPING_STEPS_FORWARD.md Sec 1 for why that term specifically), plus
+    # MissionOutcomeBonus appended to reward the actual mission outcome directly. Everything
+    # else -- action smoothness, turn penalty, track-aware shaping, fire cooldown, the small
+    # per-N-step HVAA survival tick, and the per-step tempo *penalty* while red is alive (kept,
+    # since it targets urgency-to-engage, not the loitering-after-kill behavior being removed --
+    # is unchanged from baseline, so a comparison between the two modes isolates this one change.
+    ##############################
+    MISSION_ALIGNED_REWARD_STACK = [
+        (HeadingRateLimitWrapper, dict(hdg_idx=0, max_delta=0.15)),
+        (KillRewardWrapper, dict(kill_reward=12.0)),
+        (ActionSmoothnessPenalty, dict(
+            hdg_idx=0,
+            jerk_start=0.0, jerk_end=0.0025,
+            mag_start=0.0, mag_end=0.012,
+            hold_steps=1_500_000,
+            anneal_steps=4_500_000,
+        )),
+        (MissionTempoShapingPerStep, dict(
+            penalty_per_step=-0.003,
+            bonus_per_step=0.0,  # <-- the change: was 0.006 (see docstring above)
+            require_hvaa_alive=True,
+        )),
+        (SustainedTurnPenaltySimple, dict(
+            hdg_idx=0,
+            window_size=15,
+            turn_threshold=0.5,
+            penalty_coef=0.01,
+        )),
+        (CombinedTrackAwareShaping, dict(
+            range_idx=17,
+            track_idx=26,
+            track_loss_penalty=-0.3,
+            k_close=40.0,
+            asymmetry_ratio=2.0,
+            clip_delta=0.02,
+            max_valid_delta=0.05,
+            min_range_for_penalty=0.05,
+        )),
+        (FireCooldownWrapper, dict(
+            fire_idx=3,
+            cd_start=70,
+            cd_end=120,
+            cd_hold=10_000,
+            cd_steps=5_000_000,
+        )),
+        (HVAASurvivalEveryNStepsBonus, dict(every_n_steps=25, bonus=0.01)),
+        (MissionOutcomeBonus, dict(hvaa_loss_penalty=-15.0, mission_success_bonus=25.0)),
+    ]
+
+    if reward_mode == "baseline":
+        active_stack = REWARD_SHAPING_STACK
+    elif reward_mode == "mission_aligned":
+        active_stack = MISSION_ALIGNED_REWARD_STACK
+    else:
+        raise ValueError(f"Unknown reward_mode={reward_mode!r}; expected 'baseline' or 'mission_aligned'")
+
+    print(f"  [Reward Mode] {reward_mode}")
+    for wrapper_cls, wrapper_kwargs in active_stack:
         e = wrapper_cls(e, **wrapper_kwargs)
 
     ##############################
