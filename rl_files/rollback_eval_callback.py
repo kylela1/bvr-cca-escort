@@ -320,11 +320,26 @@ class RollbackEvaluationCallbackTopK(BaseCallback):
         return 0.0
 
     def _create_scaled_lr_schedule(self, base_schedule: Callable, multiplier: float) -> Callable:
-        """Create a new LR schedule that scales the base schedule by multiplier."""
+        """Create a new LR schedule that scales the base schedule by multiplier.
+
+        Captures `min_lr` as a plain local float rather than reading `self.min_lr` inside the
+        closure -- the closure returned here gets assigned directly onto `model.learning_rate`/
+        `model.lr_schedule` (see _update_learning_rate) and is never removed afterward, unlike
+        the `train` monkey-patch SkippableTrainPPO replaced. If this closure captured `self`
+        (the callback), it would keep `self.eval_env` (a live Godot socket) reachable from
+        `model.__dict__` for the rest of the run, reintroducing the exact
+        "cannot pickle '_thread.lock' object" failure on model.save() that SkippableTrainPPO
+        was written to eliminate -- just via this schedule-override path instead of the train()
+        monkey-patch path. Confirmed to reproduce on any run with a scheduled (non-constant)
+        learning rate that triggers at least one rollback (e.g. my_first_run, 10M steps, 5
+        rollbacks, both ppo_bace_blue_lead.zip and best_checkpoint/best_model.zip saved as
+        0 bytes).
+        """
+        min_lr = self.min_lr
         def scaled_schedule(progress_remaining: float) -> float:
             base_lr = base_schedule(progress_remaining)
             scaled_lr = base_lr * multiplier
-            return max(scaled_lr, self.min_lr)
+            return max(scaled_lr, min_lr)
         return scaled_schedule
 
     def _update_learning_rate(self, new_multiplier: float):

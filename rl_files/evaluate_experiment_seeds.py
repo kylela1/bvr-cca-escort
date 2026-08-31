@@ -1483,6 +1483,13 @@ def _timestep_phase_label(index: int, total: int) -> str:
 def main():
     args = parse_args()
 
+    ##############################
+    # Same reasoning as train_bace_clean.py's --torch-threads: single-environment, small-MLP
+    # inference doesn't benefit from PyTorch's default multi-threaded CPU ops, and those threads
+    # otherwise compete with the Godot subprocess for the same physical cores.
+    ##############################
+    torch.set_num_threads(1)
+
     experiment_dir = Path(args.experiment_dir).expanduser().resolve()
     ##############################
     # Check if experiment directory exists

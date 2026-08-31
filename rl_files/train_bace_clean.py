@@ -37,6 +37,7 @@ from typing import Any, Dict, Tuple, Callable, List
 import math
 
 import numpy as np
+import torch
 
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.logger import configure
@@ -847,6 +848,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="'cpu' or 'cuda'"
     )
     parser.add_argument(
+        "--torch-threads",
+        type=int,
+        default=1,
+        help=(
+            "PyTorch intraop thread count for CPU training (default: 1). With n_envs=1 and a "
+            "small 2x512 MLP, PyTorch's default (one thread per physical core) spends more time "
+            "on thread synchronization than it saves on these tiny matmuls, and those threads "
+            "directly compete with the Godot subprocess for the same physical cores. Set higher "
+            "only if profiling on your specific machine shows it helps."
+        ),
+    )
+    parser.add_argument(
         "--run-name",
         type=str,
         default=None,
@@ -999,6 +1012,14 @@ def _parse_args():
 
 def main():
     args = _parse_args()
+
+    ##############################
+    # Cap PyTorch's CPU thread pool before any model/tensor work happens. See --torch-threads
+    # help text: with a single environment and a small MLP, PyTorch's default multi-threaded
+    # BLAS ops mostly just contend with the Godot subprocess for the same physical cores rather
+    # than speeding anything up.
+    ##############################
+    torch.set_num_threads(max(1, args.torch_threads))
 
     np.random.seed(args.seed)
 
