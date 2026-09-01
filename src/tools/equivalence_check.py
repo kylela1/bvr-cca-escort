@@ -30,14 +30,14 @@ not have this problem, since it doesn't depend on simulated physics/spawn outcom
 
 Usage:
     # Capture a baseline snapshot of current structure + a trajectory sample:
-    python tools/equivalence_check.py capture baselines/default.json --total-timesteps 100000
+    python src/tools/equivalence_check.py capture config/equivalence_baselines/default.json --total-timesteps 100000
 
     # After a refactor, compare current structure against a previously captured baseline:
-    python tools/equivalence_check.py compare baselines/default.json --total-timesteps 100000
+    python src/tools/equivalence_check.py compare config/equivalence_baselines/default.json --total-timesteps 100000
 
 Any arguments after the snapshot path are forwarded verbatim to train_bace_clean.py's own
 argument parser (e.g. --use-enriched-obs --ablation-config all --expert-alignment), so you can
-capture/compare multiple configurations. A --run-name is auto-generated and its runs_sb3/
+capture/compare multiple configurations. A --run-name is auto-generated and its results/runs_sb3/
 output directory is deleted afterward -- this tool only cares about the captured JSON.
 """
 
@@ -48,12 +48,13 @@ from pathlib import Path
 
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-RL_FILES = REPO_ROOT / "rl_files"
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+RL_FILES = REPO_ROOT / "src" / "rl_files"
 if RL_FILES.as_posix() not in sys.path:
     sys.path.insert(0, RL_FILES.as_posix())
-if REPO_ROOT.as_posix() not in sys.path:
-    sys.path.insert(0, REPO_ROOT.as_posix())
+SRC_ROOT = REPO_ROOT / "src"
+if SRC_ROOT.as_posix() not in sys.path:
+    sys.path.insert(0, SRC_ROOT.as_posix())
 
 SEED = 12345
 N_STEPS = 30
@@ -266,7 +267,7 @@ def main():
             print(f"[equivalence_check] PASS: wrapper-stack structure matches {snapshot_path} exactly "
                   f"(same classes, same order, same configuration, same spaces).")
 
-    scratch_dir = REPO_ROOT / "runs_sb3" / run_name
+    scratch_dir = REPO_ROOT / "results" / "runs_sb3" / run_name
     if scratch_dir.exists():
         import shutil
         shutil.rmtree(scratch_dir, ignore_errors=True)

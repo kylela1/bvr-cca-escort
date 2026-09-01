@@ -36,12 +36,12 @@ audit) and `HOW_TO_RUN.md` (current run instructions) at the repo root.
 ### What already exists for viewing results
 
 **TensorBoard is already fully wired up — this is the first thing to try, and it requires zero
-new code.** `rl_files/train_bace_clean.py` configures an SB3 logger with both `"stdout"` and
+new code.** `src/rl_files/train_bace_clean.py` configures an SB3 logger with both `"stdout"` and
 `"tensorboard"` output formats (`configure(log_dir.as_posix(), ["stdout", "tensorboard"])`,
-near line 2271), and writes event files to `runs_sb3/<experiment_name>/<run_name>/`. To view:
+near line 2271), and writes event files to `results/runs_sb3/<experiment_name>/<run_name>/`. To view:
 
 ```bash
-tensorboard --logdir runs_sb3/<experiment_name>
+tensorboard --logdir results/runs_sb3/<experiment_name>
 ```
 
 This gives you, per run, out of the box: `eval/mean_reward`, `eval/std_reward`,
@@ -51,25 +51,25 @@ This gives you, per run, out of the box: `eval/mean_reward`, `eval/std_reward`,
 `train/entropy_loss`, `train/clip_fraction`, `train/learning_rate`, `train/entropy_coef`,
 `train/clip_range` (standard SB3 PPO diagnostics), and — if `RollbackEvaluationCallbackTopK`'s
 rollback mechanism fires — rollback events. Pointing `--logdir` at
-`runs_sb3/<experiment_name>` (the parent of all seed subfolders) overlays every seed's curves
+`results/runs_sb3/<experiment_name>` (the parent of all seed subfolders) overlays every seed's curves
 on the same charts automatically, which is the natural way to see cross-seed variance.
 
 **No Weights & Biases (or any other cloud dashboard) integration exists anywhere in the repo**
-today — confirmed by grepping for `wandb` across `rl_files/` and `b_ace_py/`: zero hits. There
+today — confirmed by grepping for `wandb` across `src/rl_files/` and `src/b_ace_py/`: zero hits. There
 is a stale `wandb/` line in `.gitignore` suggesting someone considered it at some point, but
 nothing was ever wired up.
 
 **Other existing result artifacts, not currently visualized anywhere:**
-- `runs_sb3/<run>/monitor.csv` — raw per-episode reward/length from SB3's `Monitor` wrapper.
-- `runs_sb3/<run>/training_results_seed<N>.json` — end-of-run dump of hyperparameters, full
+- `results/runs_sb3/<run>/monitor.csv` — raw per-episode reward/length from SB3's `Monitor` wrapper.
+- `results/runs_sb3/<run>/training_results_seed<N>.json` — end-of-run dump of hyperparameters, full
   episode reward/length history (downsampled), and the evaluation-callback summary. Written by
   `train_bace_clean.py::main()` near line 2606.
-- `runs_sb3/<run>/eval_checkpoints/` and `runs_sb3/<run>/best_checkpoint/` — saved model +
+- `results/runs_sb3/<run>/eval_checkpoints/` and `results/runs_sb3/<run>/best_checkpoint/` — saved model +
   `VecNormalize` snapshots at various points, produced by `RollbackEvaluationCallbackTopK`.
-- Console output from `rl_files/reward_breakdown_logger.py::CompactRewardLogger` — prints a
+- Console output from `src/rl_files/reward_breakdown_logger.py::CompactRewardLogger` — prints a
   running per-episode breakdown of reward components (tempo, range, track-loss, etc.) every 10
   episodes. Text-only, terminal-only, not persisted anywhere.
-- Output of `rl_files/evaluate_experiment_seeds.py` — writes its own JSON summary (per-seed and
+- Output of `src/rl_files/evaluate_experiment_seeds.py` — writes its own JSON summary (per-seed and
   aggregate statistics) to the experiment directory. No plotting.
 
 **Nothing in the repo currently plots anything.** No `matplotlib`, `pandas`, `seaborn`, or
@@ -77,7 +77,7 @@ nothing was ever wired up.
 hyperparameter correlation plot, etc.) was produced by tooling that isn't in this repository.
 
 **Visual playback of an actual episode (watching the aircraft fly, not just numbers) already
-works too**, via a dedicated config: `b_ace_py/Watch_B_ACE_config.json` (renderize on,
+works too**, via a dedicated config: `src/b_ace_py/Watch_B_ACE_config.json` (renderize on,
 real-time speed) — see `HOW_TO_RUN.md` for exact commands. This is a visualization of
 *behavior*, complementary to the metrics dashboards this plan is about.
 
@@ -85,11 +85,11 @@ real-time speed) — see `HOW_TO_RUN.md` for exact commands. This is a visualiza
 
 Everything is CLI-flag driven — there is no config-file-based runner and no GUI. The three
 entry points and roughly how many flags each has:
-- `rl_files/train_bace_clean.py` — ~40 flags (`--total-timesteps`, `--use-enriched-obs`,
+- `src/rl_files/train_bace_clean.py` — ~40 flags (`--total-timesteps`, `--use-enriched-obs`,
   `--ablation-config`, `--expert-alignment`, `--expert-blending`, all PPO hyperparameters, etc.)
-- `rl_files/run_experiment.py` — a thin multi-seed wrapper around the above; forwards any flag
+- `src/rl_files/run_experiment.py` — a thin multi-seed wrapper around the above; forwards any flag
   it doesn't recognize straight through to `train_bace_clean.py`.
-- `rl_files/evaluate_experiment_seeds.py` — its own ~20 flags for loading and scoring
+- `src/rl_files/evaluate_experiment_seeds.py` — its own ~20 flags for loading and scoring
   checkpoints.
 
 `HOW_TO_RUN.md` documents exact commands for common cases. There is currently no way to define
@@ -117,22 +117,22 @@ the named file/location directly — there is no flag for it.
 | Which observation-feature factors (A/B/C) are on | CLI | `--use-enriched-obs --ablation-config <name>` — see the table in `HOW_TO_RUN.md` |
 | Alignment reward shaping (Factor D) | CLI | `--expert-alignment`, `--alignment-coef`, `--alignment-decay-start/end` |
 | Action blending (Factor E) | CLI | `--expert-blending`, `--blend-initial-alpha`, `--blend-final-alpha`, `--blend-decay-start/end/type`, `--blend-fire-mode` |
-| Scenario/reward config (spawn zones, Godot-side reward weights) | Hardcoded (JSON) | `b_ace_py/SimpleExample_B_ACE_config.json` (the default), or pass `--config <path>` to point at a different JSON file, e.g. `b_ace_py/Watch_B_ACE_config.json` |
-| Fire cooldown curriculum (start/end/anneal steps) | Hardcoded | `rl_files/train_bace_clean.py`, inside `make_env()`, the `FireCooldownWrapper(...)` call (~line 2138) |
-| Kill bonus reward | Hardcoded | `rl_files/train_bace_clean.py`, `KillRewardWrapper(...)` call (~line 2100) |
-| Action smoothness penalty schedule | Hardcoded | `rl_files/train_bace_clean.py`, `ActionSmoothnessPenalty(...)` call (~line 2102) |
-| Mission tempo shaping (per-step penalty/bonus) | Hardcoded | `rl_files/train_bace_clean.py`, `MissionTempoShapingPerStep(...)` call (~line 2111) |
-| Sustained-turn penalty | Hardcoded | `rl_files/train_bace_clean.py`, `SustainedTurnPenaltySimple(...)` call (~line 2118) |
-| Track-loss / range-closure shaping | Hardcoded | `rl_files/train_bace_clean.py`, `CombinedTrackAwareShaping(...)` call (~line 2126) |
-| HVAA-alive survival bonus | Hardcoded | `rl_files/train_bace_clean.py`, `HVAASurvivalEveryNStepsBonus(...)` call (~line 2147) |
-| Heading-rate action limiter | Hardcoded | `rl_files/train_bace_clean.py`, `HeadingRateLimitWrapper(...)` call (~line 2098) |
-| Periodic-evaluation frequency / episode count | Hardcoded | `rl_files/train_bace_clean.py`, the `RollbackEvaluationCallbackTopK(...)` constructor call (~line 2404) — `eval_freq`, `n_eval_episodes` |
+| Scenario/reward config (spawn zones, Godot-side reward weights) | Hardcoded (JSON) | `src/b_ace_py/SimpleExample_B_ACE_config.json` (the default), or pass `--config <path>` to point at a different JSON file, e.g. `src/b_ace_py/Watch_B_ACE_config.json` |
+| Fire cooldown curriculum (start/end/anneal steps) | Hardcoded | `src/rl_files/train_bace_clean.py`, inside `make_env()`, the `FireCooldownWrapper(...)` call (~line 2138) |
+| Kill bonus reward | Hardcoded | `src/rl_files/train_bace_clean.py`, `KillRewardWrapper(...)` call (~line 2100) |
+| Action smoothness penalty schedule | Hardcoded | `src/rl_files/train_bace_clean.py`, `ActionSmoothnessPenalty(...)` call (~line 2102) |
+| Mission tempo shaping (per-step penalty/bonus) | Hardcoded | `src/rl_files/train_bace_clean.py`, `MissionTempoShapingPerStep(...)` call (~line 2111) |
+| Sustained-turn penalty | Hardcoded | `src/rl_files/train_bace_clean.py`, `SustainedTurnPenaltySimple(...)` call (~line 2118) |
+| Track-loss / range-closure shaping | Hardcoded | `src/rl_files/train_bace_clean.py`, `CombinedTrackAwareShaping(...)` call (~line 2126) |
+| HVAA-alive survival bonus | Hardcoded | `src/rl_files/train_bace_clean.py`, `HVAASurvivalEveryNStepsBonus(...)` call (~line 2147) |
+| Heading-rate action limiter | Hardcoded | `src/rl_files/train_bace_clean.py`, `HeadingRateLimitWrapper(...)` call (~line 2098) |
+| Periodic-evaluation frequency / episode count | Hardcoded | `src/rl_files/train_bace_clean.py`, the `RollbackEvaluationCallbackTopK(...)` constructor call (~line 2404) — `eval_freq`, `n_eval_episodes` |
 | Rollback thresholds (when to revert to an earlier checkpoint) | Hardcoded | Same `RollbackEvaluationCallbackTopK(...)` call — `deficit_threshold`, `rollback_patience`, `activation_threshold`, `min_timesteps_before_rollback` |
-| Scripted-expert FSM behavior (fire envelope, pursuit memory, etc.) | Hardcoded | `rl_files/aggressive_hunter_fixed.py`, `AggressiveHunterFixed.__init__` defaults |
-| Final evaluation episode count (post-training smoke check inside `train_bace_clean.py`) | Hardcoded | `rl_files/train_bace_clean.py`, the `while episodes_completed < 20:` loop near line 2461 |
+| Scripted-expert FSM behavior (fire envelope, pursuit memory, etc.) | Hardcoded | `src/rl_files/aggressive_hunter_fixed.py`, `AggressiveHunterFixed.__init__` defaults |
+| Final evaluation episode count (post-training smoke check inside `train_bace_clean.py`) | Hardcoded | `src/rl_files/train_bace_clean.py`, the `while episodes_completed < 20:` loop near line 2461 |
 
 If a parameter you want isn't in this table, it's either genuinely a CLI flag not listed here
-(check `rl_files/train_bace_clean.py`'s `_parse_args()`, ~line 1543 onward) or it's inside one
+(check `src/rl_files/train_bace_clean.py`'s `_parse_args()`, ~line 1543 onward) or it's inside one
 of the reward-shaping wrapper *class definitions themselves* (their `__init__` defaults) rather
 than at the call site — see Improvement Plan 2 for why there are so many of these and how that
 could be consolidated.
@@ -149,7 +149,7 @@ training logic at all.
 1. Add `wandb` to the project's dependency list (see Improvement Plan 2, Task on dependency
    pinning, for where that list should live — if it doesn't exist yet, just note in your PR/commit
    that `pip install wandb` is now an optional extra).
-2. In `rl_files/train_bace_clean.py`, near where the SB3 logger is configured (search for
+2. In `src/rl_files/train_bace_clean.py`, near where the SB3 logger is configured (search for
    `configure(log_dir.as_posix(), ["stdout", "tensorboard"])`), add an **opt-in** W&B hook:
    - New CLI flag: `--use-wandb` (default `False`, `action="store_true"`), plus
      `--wandb-project` (default e.g. `"bvr-cca-escort"`) and `--wandb-entity` (default `None`).
@@ -167,7 +167,7 @@ training logic at all.
      pixel identical to today (this is important: most users of this repo will not have a W&B
      account, and the script must work exactly as before with zero new required dependencies).
 3. Mirror the same three flags (`--use-wandb`, `--wandb-project`, `--wandb-entity`) onto
-   `rl_files/run_experiment.py` so a multi-seed sweep can opt in too (it just needs to forward
+   `src/rl_files/run_experiment.py` so a multi-seed sweep can opt in too (it just needs to forward
    them through to each `train_bace_clean.py` invocation the same way it forwards everything
    else — check whether they already pass through via `parse_known_args()`'s catch-all before
    adding special-case handling).
@@ -192,12 +192,12 @@ training curves.
 
 **Recommended approach:** a single-file [Streamlit](https://streamlit.io/) app (`pip install
 streamlit`), since it needs no build step, no frontend code, and can be launched with one
-command (`streamlit run tools/dashboard.py`) — this matches "intuitive," is easy for a
+command (`streamlit run src/tools/dashboard.py`) — this matches "intuitive," is easy for a
 follow-on maintainer to extend, and doesn't require standing up a server.
 
 **What it should do**, reading *only already-existing* output files (do not change what
 `train_bace_clean.py` or `evaluate_experiment_seeds.py` write out):
-1. **Run picker.** Scan `runs_sb3/` for experiment directories and seed subdirectories (same
+1. **Run picker.** Scan `results/runs_sb3/` for experiment directories and seed subdirectories (same
    directory-walking logic `evaluate_experiment_seeds.py::find_seed_models()` already uses —
    reuse or closely mirror it rather than reinventing directory-parsing logic). Let the user
    pick one or more runs to compare.
@@ -220,11 +220,11 @@ follow-on maintainer to extend, and doesn't require standing up a server.
    show the exact `tensorboard --logdir ...` command to run, or embed TensorBoard via its
    `tensorboard.program` API if that turns out to be low-effort, but don't block the rest of
    the dashboard on getting that embed working.
-6. Put this at `tools/dashboard.py` (create the `tools/` directory if it doesn't exist) and add
+6. Put this at `src/tools/dashboard.py` (create the `src/tools/` directory if it doesn't exist) and add
    a short usage note to `HOW_TO_RUN.md` once it's implemented.
 
-**Acceptance criteria:** `streamlit run tools/dashboard.py` opens a browser tab, lets you pick
-one or more completed runs from `runs_sb3/`, and shows at minimum a reward-vs-timestep chart
+**Acceptance criteria:** `streamlit run src/tools/dashboard.py` opens a browser tab, lets you pick
+one or more completed runs from `results/runs_sb3/`, and shows at minimum a reward-vs-timestep chart
 and the run's hyperparameter config, without requiring the training scripts to be modified in
 any way that changes what they compute or write out.
 
@@ -237,8 +237,8 @@ remembering/reconstructing a long command line every time (see `HOW_TO_RUN.md`'s
 There's no way to save "this is what design run BD means" once and reuse it.
 
 **What to do:**
-1. Create a `configs/` directory (repo root) containing one YAML file per named run
-   configuration, e.g. `configs/baseline.yaml`, `configs/factor_B.yaml`, `configs/factor_BD.yaml`.
+1. Create a `config/launch/` directory (repo root) containing one YAML file per named run
+   configuration, e.g. `config/launch/baseline.yaml`, `config/launch/factor_B.yaml`, `config/launch/factor_BD.yaml`.
    Each YAML file's keys should be **a 1:1 mapping to existing `train_bace_clean.py` CLI flag
    names** (with dashes or underscores — pick one and be consistent), e.g.:
    ```yaml
@@ -248,7 +248,7 @@ There's no way to save "this is what design run BD means" once and reuse it.
    ablation_config: engagement_only
    expert_alignment: true
    ```
-2. Add a thin launcher script, `rl_files/run_from_config.py`, that: loads a YAML file, converts
+2. Add a thin launcher script, `src/rl_files/run_from_config.py`, that: loads a YAML file, converts
    its keys into the equivalent `--flag value` / `--flag` (for booleans) arguments, and either
    (a) invokes `train_bace_clean.py`'s existing `main()` with those arguments injected into
    `sys.argv` before calling it, or (b) shells out to `python train_bace_clean.py <args>` via
@@ -262,7 +262,7 @@ There's no way to save "this is what design run BD means" once and reuse it.
      `run_experiment.py` does — or better, just have this script delegate to
      `run_experiment.py` when multiple seeds are requested, rather than reimplementing the
      seed loop a third time.
-3. Usage should end up being: `python rl_files/run_from_config.py configs/factor_BD.yaml`.
+3. Usage should end up being: `python src/rl_files/run_from_config.py config/launch/factor_BD.yaml`.
 4. **Verify:** confirm that a YAML-launched run and the equivalent hand-written CLI command
    produce byte-identical `train_bace_clean.py` invocations (e.g., print the constructed
    command and diff it against the manual one) before trusting this for real experiments.

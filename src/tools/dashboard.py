@@ -7,7 +7,7 @@ train_bace_clean.py or evaluate_experiment_seeds.py compute or write out, and do
 a Weights & Biases account (see Task 1 / --use-wandb for that alternative).
 
 Usage:
-    streamlit run tools/dashboard.py
+    streamlit run src/tools/dashboard.py
 """
 
 import json
@@ -23,16 +23,16 @@ import pandas as pd
 import streamlit as st
 
 THIS_FILE = Path(__file__).resolve()
-REPO_ROOT = THIS_FILE.parent.parent
-RUNS_DIR = REPO_ROOT / "runs_sb3"
+REPO_ROOT = THIS_FILE.parent.parent.parent
+RUNS_DIR = REPO_ROOT / "results" / "runs_sb3"
 
 
 def find_runs(runs_dir: Path) -> Dict[str, Path]:
     """
-    Scan runs_sb3/ for every directory that directly contains a training_results_seed*.json --
-    this is "a run" for this dashboard's purposes. Covers both flat single runs
-    (runs_sb3/<run_name>/) and grouped multi-seed experiments
-    (runs_sb3/<experiment_name>/<run_name_with_seedN>/), mirroring the directory-walking
+    Scan results/runs_sb3/ for every directory that directly contains a
+    training_results_seed*.json -- this is "a run" for this dashboard's purposes. Covers both
+    flat single runs (results/runs_sb3/<run_name>/) and grouped multi-seed experiments
+    (results/runs_sb3/<experiment_name>/<run_name_with_seedN>/), mirroring the directory-walking
     pattern evaluate_experiment_seeds.py::find_seed_models() already uses (glob for a
     'seed'-containing name one level down), without needing to import that module (this
     dashboard only reads training_results JSON, not model checkpoints).
@@ -168,7 +168,7 @@ def main():
     st.set_page_config(page_title="B-ACE Training Dashboard", layout="wide")
     st.title("B-ACE Training Dashboard")
     st.caption(
-        "Reads existing runs_sb3/ output files only (monitor.csv, training_results_seed*.json) "
+        "Reads existing results/runs_sb3/ output files only (monitor.csv, training_results_seed*.json) "
         "-- does not affect training. For per-step PPO diagnostics (policy loss, entropy, clip "
         "fraction), use TensorBoard alongside this dashboard (see the sidebar)."
     )
@@ -176,7 +176,7 @@ def main():
     runs = find_runs(RUNS_DIR)
 
     if not runs:
-        st.warning(f"No completed runs found under `{RUNS_DIR}`. Run some training first (see HOW_TO_RUN.md).")
+        st.warning(f"No completed runs found under `{RUNS_DIR}`. Run some training first (see docs/HOW_TO_RUN.md).")
         st.stop()
 
     with st.sidebar:

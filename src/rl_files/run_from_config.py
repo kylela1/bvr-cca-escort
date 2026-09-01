@@ -9,13 +9,13 @@ IMPROVEMENT_PLAN_1_VISUALIZATION_AND_RUNNING.md Task 3).
 
 Every key in a config YAML file must equal the `dest` name of a real train_bace_clean.py
 argparse flag (e.g. `--total-timesteps` -> `total_timesteps`, `--use-enriched-obs` ->
-`use_enriched_obs`) -- run `python rl_files/train_bace_clean.py --help` to see the full flag
+`use_enriched_obs`) -- run `python src/rl_files/train_bace_clean.py --help` to see the full flag
 list, or read train_bace_clean.py's _build_arg_parser(). An unrecognized key is a hard error,
 not a silent no-op, so a typo'd or renamed flag can't quietly do nothing.
 
 Usage:
-    python rl_files/run_from_config.py configs/baseline.yaml
-    python rl_files/run_from_config.py configs/factor_BD.yaml --dry-run
+    python src/rl_files/run_from_config.py config/launch/baseline.yaml
+    python src/rl_files/run_from_config.py config/launch/factor_BD.yaml --dry-run
 """
 
 import argparse
@@ -27,7 +27,7 @@ from typing import Any, Dict, List
 import yaml
 
 THIS_FILE = Path(__file__).resolve()
-REPO_ROOT = THIS_FILE.parent.parent
+REPO_ROOT = THIS_FILE.parent.parent.parent
 for p in (REPO_ROOT, THIS_FILE.parent):
     if p.as_posix() not in sys.path:
         sys.path.insert(0, p.as_posix())
@@ -114,7 +114,7 @@ def config_to_cli_args(config: Dict[str, Any]) -> List[str]:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("config_path", type=str, help="Path to a YAML run config (see configs/*.yaml for examples).")
+    parser.add_argument("config_path", type=str, help="Path to a YAML run config (see config/launch/*.yaml for examples).")
     parser.add_argument("--dry-run", action="store_true", help="Print the command that would run, without running it.")
     args = parser.parse_args()
 
@@ -155,12 +155,12 @@ def main():
 
         cmd = [
             sys.executable,
-            str(REPO_ROOT / "rl_files" / "run_experiment.py"),
+            str(REPO_ROOT / "src" / "rl_files" / "run_experiment.py"),
             "--experiment-name", str(config["experiment_name"]),
             "--seeds", *[str(s) for s in seeds],
         ] + run_experiment_args
     else:
-        cmd = [sys.executable, str(REPO_ROOT / "rl_files" / "train_bace_clean.py")] + cli_args
+        cmd = [sys.executable, str(REPO_ROOT / "src" / "rl_files" / "train_bace_clean.py")] + cli_args
 
     print(f"[run_from_config] Config: {config_path}")
     print(f"[run_from_config] Command: {' '.join(cmd)}")

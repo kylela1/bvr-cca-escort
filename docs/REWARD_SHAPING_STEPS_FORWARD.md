@@ -17,7 +17,7 @@ I traced through the exact numbers, and there is a specific, identifiable reason
 reward doesn't track mission outcome well — not just a vague "rewards are messy" concern.
 
 **`env_factory.py`'s `REWARD_SHAPING_STACK` includes `MissionTempoShapingPerStep` with
-`penalty_per_step=-0.003, bonus_per_step=0.006`** (`rl_files/mission_tempo_shaping_perstep.py`).
+`penalty_per_step=-0.003, bonus_per_step=0.006`** (`src/rl_files/mission_tempo_shaping_perstep.py`).
 While red is alive, the agent loses 0.003 every step. Once red is killed, the agent gains
 0.006 every step *for as long as the episode continues and the HVAA is alive* — regardless of
 whether the mission is actually progressing toward completion.
@@ -32,7 +32,7 @@ ran during this session's pilot):
   **+72.0**, before even counting the one-time `KillRewardWrapper` bonus (+12) or Godot's own
   `hit_enemy_factor` (+10).
 - **Compare to actually completing the mission**: `mission_accomplished_factor` in
-  `b_ace_py/SimpleExample_B_ACE_config.json` is **+8.0**, a *one-time* terminal reward — and
+  `src/b_ace_py/SimpleExample_B_ACE_config.json` is **+8.0**, a *one-time* terminal reward — and
   critically, completing the mission *ends the episode early* (`"stop_mission":1`), which
   **cuts off further tempo-bonus accumulation**.
 
@@ -69,7 +69,7 @@ this is close to *literally* "redesigning the reward to better reflect mission o
 
 ## 3. The metric gap: nothing computes win rate
 
-Confirmed on this branch (`rl_files/evaluate_experiment_seeds.py`): there is no `win_rate`
+Confirmed on this branch (`src/rl_files/evaluate_experiment_seeds.py`): there is no `win_rate`
 computation anywhere in the file. It reports `HVAA Survival Rate`, `Red Kill Rate`, and
 `Blue Loss Rate` as separate per-episode aggregates, but never their conjunction (HVAA
 survives *and* CCA survives — the thesis's actual win-rate definition). This session's pilot
@@ -93,7 +93,7 @@ redesigned one from the same codebase, on demand, for a clean ablation.
 
 ### 4.1 Add a reward-mode switch, mirroring the existing `--ablation-config` pattern
 
-`build_env()` in `rl_files/env_factory.py` (around line 703, `REWARD_SHAPING_STACK`) currently
+`build_env()` in `src/rl_files/env_factory.py` (around line 703, `REWARD_SHAPING_STACK`) currently
 hardcodes one fixed list of `(WrapperClass, kwargs)` tuples. Introduce a parameter — e.g.
 `reward_mode: str = "baseline"` — and branch to a second list, e.g. `MISSION_ALIGNED_STACK`,
 when `reward_mode == "mission_aligned"`. Thread it through:
@@ -103,11 +103,11 @@ when `reward_mode == "mission_aligned"`. Thread it through:
 - `evaluate_experiment_seeds.py`'s equivalent construction call, so evaluation uses the same
   reward mode the checkpoint was trained under
 
-This gets you `python rl_files/train_bace_clean.py --reward-mode mission_aligned ...` as a
+This gets you `python src/rl_files/train_bace_clean.py --reward-mode mission_aligned ...` as a
 direct, symmetric counterpart to the existing `--ablation-config` flags — consistent with how
 this codebase already lets you toggle observation factors, and trivially compatible with the
-existing YAML launcher (`configs/*.yaml`) for tracking your two conditions as named,
-reproducible configs (e.g. `configs/reward_baseline.yaml`, `configs/reward_mission_aligned.yaml`).
+existing YAML launcher (`config/launch/*.yaml`) for tracking your two conditions as named,
+reproducible configs (e.g. `config/launch/reward_baseline.yaml`, `config/launch/reward_mission_aligned.yaml`).
 
 ### 4.2 What to actually change in the mission-aligned variant
 
@@ -268,7 +268,7 @@ agent's reward function... compare the existing baseline reward with a more miss
 reward and test the win rate"), and it's a sound, appropriately-scoped final project — narrower
 than the full thesis (as the proposal itself says), but a complete, self-contained
 contribution with a clear before/after comparison and a headline metric that isn't reward
-itself. `figures/fig4_reward_vs_winrate_rank.png` and `fig5_reward_misalignment_illustration.png`
+itself. `results/figures/fig4_reward_vs_winrate_rank.png` and `fig5_reward_misalignment_illustration.png`
 already build the motivating case for *why* this redesign is needed; that pairs well with a
 final write-up structured as: motivate (Figures 1-5) → redesign (this section) → compare
 (new figures, same format).

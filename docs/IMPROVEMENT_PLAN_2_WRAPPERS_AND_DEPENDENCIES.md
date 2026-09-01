@@ -48,7 +48,7 @@ touching the pattern itself:
 
 ### Problem 1: The stack is built twice, by hand, and the two copies have drifted apart
 
-`rl_files/train_bace_clean.py` and `rl_files/evaluate_experiment_seeds.py` each define their
+`src/rl_files/train_bace_clean.py` and `src/rl_files/evaluate_experiment_seeds.py` each define their
 **own separate copy** of the environment-construction logic (`make_env()` in the former, an
 equivalent inline builder in the latter). Some wrapper classes are even redefined from scratch
 in both files rather than imported once. Confirmed concretely:
@@ -83,7 +83,7 @@ wrong when adding a new wrapper.
 
 ### Problem 3: One piece of code reaches *outside* the wrapper stack into the PPO model itself
 
-`rl_files/rollback_eval_callback.py`'s `RollbackEvaluationCallbackTopK._init_callback()` does
+`src/rl_files/rollback_eval_callback.py`'s `RollbackEvaluationCallbackTopK._init_callback()` does
 `self.model.train = wrapped_train` — monkey-patching the `train()` method of the live PPO model
 object from within a callback, to implement "skip N training updates after a rollback." This
 breaks the wrapper/callback abstraction boundary: callbacks are supposed to observe and
@@ -136,7 +136,7 @@ Before restructuring anything, set up a way to prove a refactor didn't change be
 2. Write a small script that constructs the environment via the *current* (pre-refactor)
    `train_bace_clean.py::make_env()` path, resets with a fixed seed, steps through the fixed
    action sequence, and dumps every observation vector, reward, and `info` dict to a file
-   (e.g., `tools/equivalence_baseline.json`) — do this once, before refactoring, and commit
+   (e.g., `src/tools/equivalence_baseline.json`) — do this once, before refactoring, and commit
    the output.
 3. After each subsequent task in this plan, re-run the same script against the *refactored*
    construction path and diff the output against the committed baseline. Any difference means
@@ -153,7 +153,7 @@ behavior" requirement is only actually verifiable if this exists.
 
 ### Task 2: Extract a single, shared, declarative wrapper-stack definition
 
-1. Create `rl_files/env_factory.py` (or similar name) containing one function,
+1. Create `src/rl_files/env_factory.py` (or similar name) containing one function,
    e.g. `build_env(bace_config, args, is_eval: bool) -> gym.Env`, that is the **only** place
    the wrapper stack is constructed. Both `train_bace_clean.py` and
    `evaluate_experiment_seeds.py` should import and call this function instead of each having
@@ -218,7 +218,7 @@ methods onto model instances remains anywhere in the codebase.
 ### Task 4: Remove confirmed-dead code
 
 For each item listed under Problem 4 above: **re-confirm via a fresh grep of the entire repo**
-(not just `rl_files/`) that it has zero references outside its own definition and its own
+(not just `src/rl_files/`) that it has zero references outside its own definition and its own
 `__main__`/self-test block, then delete it. If a grep turns up even one unexpected reference,
 stop and investigate rather than deleting — don't trust this document's claim over what you
 actually find.
@@ -241,7 +241,7 @@ verify anyway — that's the whole point of the equivalence check).
 The repo has several places where two pieces of code must agree on an implicit contract, with
 nothing enforcing that agreement:
 
-1. **Observation index coupling.** `b_ace_py/enriched_observation_wrapper_ablation.py`'s
+1. **Observation index coupling.** `src/b_ace_py/enriched_observation_wrapper_ablation.py`'s
    `_extract_state_from_obs()` hardcodes numeric indices (`IDX_OWN_HDG = 5`, `IDX_OWN_SPEED = 6`,
    etc.) assuming a specific, fixed layout of the raw observation vector Godot emits. If the
    Godot-side observation order ever changes (a plausible thing to happen during 2v2 or missile-
@@ -300,11 +300,11 @@ clean machine reproduces the exact environment already confirmed working.
 
 ### Task 6: Make the observation/info-dict contracts explicit and self-checking
 
-1. Add a small module (e.g. `b_ace_py/contracts.py`) that declares, as plain Python data (a
+1. Add a small module (e.g. `src/b_ace_py/contracts.py`) that declares, as plain Python data (a
    list of strings, or a small dataclass), the **expected** base observation labels (the 27
    labels already printed at startup by `B_ACE_GodotPettingZooWrapper` — copy them verbatim
    from a real run's console output) and the **expected** `info`-dict keys the Python side
-   actually reads (enumerate these by grepping `rl_files/` and `b_ace_py/` for `info.get(`/
+   actually reads (enumerate these by grepping `src/rl_files/` and `src/b_ace_py/` for `info.get(`/
    `info[` calls — `CODEBASE_GUIDE.md`'s earlier audit already has a fuller list of Godot-
    emitted fields to cross-check against).
 2. At environment-construction time (inside the new `env_factory.py` from Task 2, or at the

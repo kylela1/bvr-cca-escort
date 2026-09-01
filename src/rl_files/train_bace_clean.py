@@ -13,7 +13,7 @@ Within the broader pipeline, this script is invoked by run_experiment.py once pe
 reads a B-ACE JSON scenario config, instantiates the Godot environment via
 B_ACE_GodotPettingZooWrapper, wraps it in a SingleAgentBACEEnv for SB3 compatibility, then
 layers on the configurable wrapper stack. Training progress, model checkpoints, and
-VecNormalize statistics are saved to a per-seed directory under runs_sb3/EXPERIMENT_NAME/.
+VecNormalize statistics are saved to a per-seed directory under results/runs_sb3/EXPERIMENT_NAME/.
 The saved artifacts are later loaded by evaluate_experiment_seeds.py for evaluation.
 
 Key configurable parameters (all via command-line arguments): --total-timesteps (default:
@@ -53,15 +53,16 @@ THIS_FILE = Path(__file__).resolve()
 ##############################
 current_path = THIS_FILE.parent
 while current_path != current_path.parent:
-    if (current_path / "b_ace_py").exists():
+    if (current_path / "src" / "b_ace_py").exists():
         REPO_ROOT = current_path
         break
     current_path = current_path.parent
 else:
-    REPO_ROOT = THIS_FILE.parent.parent
+    REPO_ROOT = THIS_FILE.parent.parent.parent
 
-if REPO_ROOT.as_posix() not in sys.path:
-    sys.path.insert(0, REPO_ROOT.as_posix())
+SRC_ROOT = REPO_ROOT / "src"
+if SRC_ROOT.as_posix() not in sys.path:
+    sys.path.insert(0, SRC_ROOT.as_posix())
 
 print(f"Using REPO_ROOT: {REPO_ROOT}")
 
@@ -732,7 +733,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         type=str,
-        default=(REPO_ROOT / "b_ace_py" / "SimpleExample_B_ACE_config.json").as_posix(),
+        default=(REPO_ROOT / "src" / "b_ace_py" / "SimpleExample_B_ACE_config.json").as_posix(),
         help="Path to a B-ACE JSON scenario config.",
     )
     parser.add_argument(
@@ -870,7 +871,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--experiment-name",
         type=str,
         default=None,
-        help="Logical experiment name used to group runs under runs_sb3/EXPERIMENT_NAME"
+        help="Logical experiment name used to group runs under results/runs_sb3/EXPERIMENT_NAME"
     )
 
     parser.add_argument(
@@ -1093,7 +1094,7 @@ def main():
     else:
         run_name = f"sb3ppo_bace_decay_seed{args.seed}_{timestamp}"
 
-    base_runs_dir = REPO_ROOT / "runs_sb3"
+    base_runs_dir = REPO_ROOT / "results" / "runs_sb3"
 
     ##############################
     # Set up directory structure for logs and checkpoints

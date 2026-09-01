@@ -17,7 +17,7 @@ and pilot results on `mostly-original`), [RUNNING_THE_EXPERIMENT.md](RUNNING_THE
 
 `new-code` is **not** a different experiment or a different model — it's a deliberate
 refactor/hardening pass over the exact same simulation, reward function, and training logic,
-verified with a structural equivalence-check tool (`tools/equivalence_check.py`) before/after
+verified with a structural equivalence-check tool (`src/tools/equivalence_check.py`) before/after
 each change. The Godot simulation itself is untouched on both branches. The intent, per its
 own commit message, was zero behavior change except one explicitly-called-out exception (§3.1).
 
@@ -46,7 +46,7 @@ copy of the environment wrapper stack — missing roughly 8 wrappers that traini
 (`HeadingRateLimitWrapper`, `ActionSmoothnessPenalty`, `MissionTempoShapingPerStep`,
 `SustainedTurnPenaltySimple`, `CombinedTrackAwareShaping`, `KillRewardWrapper`, and others).
 
-`new-code` introduces `rl_files/env_factory.py` as the **single shared** `build_env()` used by
+`new-code` introduces `src/rl_files/env_factory.py` as the **single shared** `build_env()` used by
 both training and evaluation, so evaluation now uses the exact same reward-shaping stack
 training does.
 
@@ -57,10 +57,10 @@ composition — only the "Mean Reward" column differs.
 
 ### 3.2 YAML-based run launcher (`new-code` only)
 
-`rl_files/run_from_config.py` + `configs/*.yaml` — doesn't exist on `mostly-original`. Save a
+`src/rl_files/run_from_config.py` + `config/launch/*.yaml` — doesn't exist on `mostly-original`. Save a
 design run's flags once, launch with:
 ```powershell
-python rl_files/run_from_config.py configs/factor_BD.yaml
+python src/rl_files/run_from_config.py config/launch/factor_BD.yaml
 ```
 instead of retyping a long command. Validates every YAML key against `train_bace_clean.py`'s
 actual argparse flags at launch time — a typo'd or renamed key is a hard error, not a silent
@@ -69,7 +69,7 @@ no-op. Supports `--dry-run` to preview the equivalent CLI command without runnin
 Pre-written configs matching the thesis's factors: `baseline.yaml`, `factor_A.yaml`,
 `factor_B.yaml`, `factor_BD.yaml`, `factor_BD_multiseed.yaml`, `factor_ABCE.yaml`.
 
-### 3.3 `b_ace_py/contracts.py` (`new-code` only)
+### 3.3 `src/b_ace_py/contracts.py` (`new-code` only)
 
 A safety net asserting, at every environment construction, that Godot's actual reported
 observation labels match what the positional-index code
@@ -96,11 +96,11 @@ happens to match, but nothing in-repo declares or enforces it.
 
 ### 3.5 Streamlit results dashboard (`new-code` only)
 
-`tools/dashboard.py` — reads only existing output files (`monitor.csv`,
+`src/tools/dashboard.py` — reads only existing output files (`monitor.csv`,
 `training_results_seed<N>.json`); doesn't change what training/eval compute or write.
 ```powershell
 pip install streamlit matplotlib pandas   # once
-streamlit run tools/dashboard.py
+streamlit run src/tools/dashboard.py
 ```
 Opens a browser tab to pick and compare completed runs: reward-vs-timestep curves, evaluation
 summary with confidence bands, hyperparameter config at a glance.
@@ -162,13 +162,13 @@ $env:PYTHONUTF8 = "1"
 pip install -r requirements.txt          # once per venv, if not already matching
 
 # Equivalent hand-written command (identical flag names to mostly-original):
-python rl_files/train_bace_clean.py --total-timesteps 10000000 --use-enriched-obs --ablation-config engagement_only --expert-alignment --experiment-name BD_test
+python src/rl_files/train_bace_clean.py --total-timesteps 10000000 --use-enriched-obs --ablation-config engagement_only --expert-alignment --experiment-name BD_test
 
 # Or the YAML shortcut for the same run:
-python rl_files/run_from_config.py configs/factor_BD.yaml
+python src/rl_files/run_from_config.py config/launch/factor_BD.yaml
 
 # Multi-seed sweep (same flag on either branch):
-python rl_files/run_experiment.py --experiment-name BD_multiseed --seeds 42 123 456 789 --total-timesteps 10000000 --use-enriched-obs --ablation-config engagement_only --expert-alignment
+python src/rl_files/run_experiment.py --experiment-name BD_multiseed --seeds 42 123 456 789 --total-timesteps 10000000 --use-enriched-obs --ablation-config engagement_only --expert-alignment
 ```
 
 > ⚠️ **The flag *names* are identical on both branches** (same thesis-factor mapping), so a
@@ -180,31 +180,35 @@ python rl_files/run_experiment.py --experiment-name BD_multiseed --seeds 42 123 
 
 ## 5. Where to find results, and how to analyze them
 
-Both branches write to the same `runs_sb3/<experiment_name>/<run_name>/` structure:
+Both branches write the same directory structure, but under different roots: `runs_sb3/` on
+`mostly-original`, `results/runs_sb3/` on `new-code` (this branch's own directory reorganization
+moved it; see `docs/SESSION_SUMMARY.md` if you're reading this from `new-code`). Substitute
+whichever root matches the branch you're on in every path below:
 ```
-runs_sb3/<name>/<name>_seed<N>/
+<runs_root>/<name>/<name>_seed<N>/
 ├── training_results_seed<N>.json     ← config used, per-checkpoint eval history, best/final reward
 ├── best_checkpoint/best_policy.pt + best_vecnormalize.pkl   ← the usable trained weights
-├── monitor.csv, events.out.tfevents.*                        ← tensorboard --logdir runs_sb3/<name>
+├── monitor.csv, events.out.tfevents.*                        ← tensorboard --logdir <runs_root>/<name>
 └── (ppo_bace_blue_lead.zip / best_checkpoint/best_model.zip are 0 bytes on mostly-original
      due to the model.save() bug in §2 — harmless, the .pt files above are authoritative;
      new-code's SkippableTrainPPO fix means these .zip files save correctly there instead)
 
-runs_sb3/<name>/superlative_eval_results.json   ← mission-outcome metrics from evaluate_experiment_seeds.py
+<runs_root>/<name>/superlative_eval_results.json   ← mission-outcome metrics from evaluate_experiment_seeds.py
 ```
+(`<runs_root>` = `runs_sb3` on `mostly-original`, `results/runs_sb3` on `new-code`.)
 
-**Identical on both branches:**
-- TensorBoard: `tensorboard --logdir runs_sb3/<name>`
+**Identical on both branches (besides the `<runs_root>` substitution above):**
+- TensorBoard: `tensorboard --logdir <runs_root>/<name>`
 - Manual JSON reading:
   ```powershell
-  python -c "import json; print(json.dumps(json.load(open('runs_sb3/<name>/superlative_eval_results.json')), indent=2))"
+  python -c "import json; print(json.dumps(json.load(open('<runs_root>/<name>/superlative_eval_results.json')), indent=2))"
   ```
 
 **`new-code` only:**
 - Purpose-built dashboard instead of TensorBoard's generic view or hand-reading JSON:
   ```powershell
   pip install streamlit matplotlib pandas   # once
-  streamlit run tools/dashboard.py
+  streamlit run src/tools/dashboard.py
   ```
 - Remote/mobile monitoring via `--use-wandb --wandb-project bvr-cca-escort` on the training
   command.

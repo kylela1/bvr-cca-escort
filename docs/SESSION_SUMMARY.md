@@ -7,12 +7,12 @@ Branch: `new-code`. Companion docs: `REWARD_SHAPING_STEPS_FORWARD.md` (full rati
 ## 1. What was done this session
 
 1. **Fixed a latent checkpoint-corruption bug.** `RollbackEvaluationCallbackTopK._create_scaled_lr_schedule()`
-   in `rl_files/rollback_eval_callback.py` returned a closure that captured `self` via
+   in `src/rl_files/rollback_eval_callback.py` returned a closure that captured `self` via
    `self.min_lr`. Once a rollback fired (any run past 4,000,000 timesteps), that closure got
    assigned onto the model and made the whole model object unpicklable by `cloudpickle` at
    `model.save()` time — silently producing 0-byte `.zip` checkpoints with no error. Fixed by
    capturing `min_lr` and `base_schedule` as local values before defining the closure.
-2. **Implemented a mission-aligned reward mode** in `rl_files/env_factory.py` (`build_env()`'s
+2. **Implemented a mission-aligned reward mode** in `src/rl_files/env_factory.py` (`build_env()`'s
    new `reward_mode` parameter) and threaded it through `train_bace_clean.py` and
    `evaluate_experiment_seeds.py` as a `--reward-mode {baseline,mission_aligned}` CLI flag
    (details in §3 below).
@@ -26,18 +26,18 @@ Branch: `new-code`. Companion docs: `REWARD_SHAPING_STEPS_FORWARD.md` (full rati
    reward is intentionally lower (no more per-step loiter bonus), and the mission-aligned run's
    evaluation reward peaks around 6,600,000 timesteps then degrades — the rollback mechanism
    already protects the deployed checkpoint from this.
-5. **Generated comparison figures** (`figures/generate_comparison_figures.py` →
+5. **Generated comparison figures** (`src/analysis/generate_comparison_figures.py` →
    `fig_c1/c2/c3_*.png`) extending the existing pilot-figure pipeline
-   (`figures/generate_figures.py`).
+   (`src/analysis/generate_figures.py`).
 
 ## 2. The environment lifecycle — build, call, step, reset (exact code)
 
-Everything below is `rl_files/env_factory.py` unless noted.
+Everything below is `src/rl_files/env_factory.py` unless noted.
 
 ### Build — `build_env()` assembles one fully-wrapped environment
 
 ```python
-# rl_files/env_factory.py, build_env() signature (line 668)
+# src/rl_files/env_factory.py, build_env() signature (line 668)
 def build_env(
     bace_config: Dict[str, Any],
     *,
@@ -76,13 +76,13 @@ and evaluation can never silently drift apart again (they used to, on the old co
 ### Call — constructing `SingleAgentBACEEnv` starts the actual Godot process
 
 ```python
-# rl_files/env_factory.py, SingleAgentBACEEnv.__init__ (line 87)
+# src/rl_files/env_factory.py, SingleAgentBACEEnv.__init__ (line 87)
 self._ma_env = B_ACE_GodotPettingZooWrapper(device="cpu", **bace_config)
 ```
 
-`B_ACE_GodotPettingZooWrapper` (in `b_ace_py/B_ACE_GodotPettingZooWrapper.py`) launches the
+`B_ACE_GodotPettingZooWrapper` (in `src/b_ace_py/B_ACE_GodotPettingZooWrapper.py`) launches the
 `B_ACE_v0.1.exe` Godot subprocess, opens the TCP socket to it, and sends the scenario config
-(`bace_config`, loaded from a JSON file like `b_ace_py/SimpleExample_B_ACE_config.json`).
+(`bace_config`, loaded from a JSON file like `src/b_ace_py/SimpleExample_B_ACE_config.json`).
 
 ### Reset — `SingleAgentBACEEnv.reset()` (line 190)
 
@@ -120,7 +120,7 @@ Action is a 4-vector in `[-1, 1]` (heading, and 3 others per the scenario's acti
 Each wrapper in the stack then adds to `reward` and can flip `terminated`/read `info` on its
 way back up — e.g. `MissionOutcomeBonus.step()`:
 ```python
-# rl_files/env_factory.py, MissionOutcomeBonus.step() (line 358)
+# src/rl_files/env_factory.py, MissionOutcomeBonus.step() (line 358)
 obs, reward, terminated, truncated, info = self.env.step(action)
 if not self._hvaa_loss_applied and not info.get("hvaa_alive", True):
     reward += self.hvaa_loss_penalty            # -15.0, one-time
@@ -139,38 +139,38 @@ $env:PYTHONUTF8 = "1"
 
 **Train** (baseline reward, the existing default):
 ```powershell
-python rl_files\train_bace_clean.py `
+python src\rl_files\train_bace_clean.py `
   --experiment-name my_run --seed 42 --total-timesteps 10000000 `
   --reward-mode baseline --torch-threads 1
 ```
 
 **Train with the mission-aligned reward redesign** (just change one flag):
 ```powershell
-python rl_files\train_bace_clean.py `
+python src\rl_files\train_bace_clean.py `
   --experiment-name my_reshaped_run --seed 42 --total-timesteps 10000000 `
   --reward-mode mission_aligned --torch-threads 1
 ```
-Output goes to `runs_sb3\<experiment-name>\<experiment-name>_seed42_<timestamp>\`.
+Output goes to `results\runs_sb3\<experiment-name>\<experiment-name>_seed42_<timestamp>\`.
 
 **Evaluate** a finished run's best checkpoint (20 episodes, must match the `--reward-mode`
 it was trained with):
 ```powershell
-python rl_files\evaluate_experiment_seeds.py `
-  --experiment-dir runs_sb3\my_reshaped_run --episodes 20 --reward-mode mission_aligned
+python src\rl_files\evaluate_experiment_seeds.py `
+  --experiment-dir results\runs_sb3\my_reshaped_run --episodes 20 --reward-mode mission_aligned
 ```
-Writes `runs_sb3\my_reshaped_run\superlative_eval_results.json` (win rate, HVAA survival,
+Writes `results\runs_sb3\my_reshaped_run\superlative_eval_results.json` (win rate, HVAA survival,
 red kill, blue loss, mean reward — the numbers used in `REWARD_REDESIGN_RESULTS.md`).
 
 **Visualize training** (TensorBoard, live while training or after):
 ```powershell
-tensorboard --logdir runs_sb3\my_reshaped_run
+tensorboard --logdir results\runs_sb3\my_reshaped_run
 ```
 
 **Regenerate the comparison figures** after a new pair of runs:
 ```powershell
-python figures\generate_comparison_figures.py
+python src\analysis\generate_comparison_figures.py
 ```
-Edit the `RUNS` dict at the top of `figures\generate_comparison_figures.py` to point at your
+Edit the `RUNS` dict at the top of `src\analysis\generate_comparison_figures.py` to point at your
 new run directories and eval-results files first.
 
 ### Key parameters
@@ -181,7 +181,7 @@ new run directories and eval-results files first.
 | `--total-timesteps` | 1,000,000 | Thesis scale is 10,000,000; pilots in this project used 2,000,000. |
 | `--seed` | 42 | Also seeds the eval env when the same value is passed to `evaluate_experiment_seeds.py`. |
 | `--torch-threads` | 1 | Keep at 1 on this machine — the default PyTorch thread pool competes with the Godot subprocess for CPU and slows training. |
-| `--experiment-name` | none (required in practice) | Groups the run under `runs_sb3\<name>\`. |
+| `--experiment-name` | none (required in practice) | Groups the run under `results\runs_sb3\<name>\`. |
 | `--use-enriched-obs` / `--ablation-config` | off / `all` | Factors A/B/C (geometry/engagement/range-limited observation features). |
 | `--expert-alignment` | off | Factor D (alignment-based reward shaping during training only). |
 | `--expert-blending` | off | Factor E (action blending with an expert policy during training only). |

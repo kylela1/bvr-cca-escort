@@ -4,12 +4,12 @@ Generates comparison figures for the full-scale baseline run (my_first_run,
 reward_mode="baseline") vs. the reward-redesign run (reshaped_rewards1,
 reward_mode="mission_aligned"). Every number is read directly from
 training_results_seed42.json, superlative_eval_results.json, or the TensorBoard
-event files under runs_sb3/ -- nothing here is fabricated or hand-transcribed.
+event files under results/runs_sb3/ -- nothing here is fabricated or hand-transcribed.
 
 Usage:
-    python figures/generate_comparison_figures.py
+    python src/analysis/generate_comparison_figures.py
 
-Outputs PNG files into this same figures/ directory.
+Outputs PNG files into results/figures/.
 """
 
 import json
@@ -22,12 +22,12 @@ import matplotlib.ticker as mticker
 import numpy as np
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-RUNS_DIR = REPO_ROOT / "runs_sb3"
-OUT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+RUNS_DIR = REPO_ROOT / "results" / "runs_sb3"
+OUT_DIR = REPO_ROOT / "results" / "figures"
 
 # ----------------------------------------------------------------------------------------
-# Same validated light-mode palette as figures/generate_figures.py.
+# Same validated light-mode palette as src/analysis/generate_figures.py.
 # ----------------------------------------------------------------------------------------
 INK_PRIMARY = "#0b0b0b"
 INK_SECONDARY = "#52514e"
@@ -168,7 +168,7 @@ def figure_c2_mission_outcomes(data):
     ax.set_ylim(0, 115)
 
     fig.text(0.01, -0.03,
-              "Source: runs_sb3/<run>/superlative_eval_results.json (cross_seed_statistics; "
+              "Source: results/runs_sb3/<run>/superlative_eval_results.json (cross_seed_statistics; "
               "1 seed x 20 episodes each -- single-seed point estimates, not a significance test).",
               fontsize=7, color=INK_MUTED, ha="left")
 

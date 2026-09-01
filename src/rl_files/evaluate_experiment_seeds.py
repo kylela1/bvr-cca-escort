@@ -51,18 +51,19 @@ while current_path != current_path.parent:
     ##############################
     # Check if this is the repo root by looking for b_ace_py directory
     ##############################
-    if (current_path / "b_ace_py").exists():
+    if (current_path / "src" / "b_ace_py").exists():
         REPO_ROOT = current_path
         break
     current_path = current_path.parent
 else:
-    REPO_ROOT = THIS_FILE.parent.parent
+    REPO_ROOT = THIS_FILE.parent.parent.parent
 
 ##############################
-# Add repository root to Python path if not already present
+# Add src/ to Python path if not already present
 ##############################
-if REPO_ROOT.as_posix() not in sys.path:
-    sys.path.insert(0, REPO_ROOT.as_posix())
+SRC_ROOT = REPO_ROOT / "src"
+if SRC_ROOT.as_posix() not in sys.path:
+    sys.path.insert(0, SRC_ROOT.as_posix())
 
 print(f"Using REPO_ROOT: {REPO_ROOT}")
 
@@ -1584,7 +1585,7 @@ def main():
     if args.config:
         config_path = Path(args.config).expanduser().resolve()
     else:
-        config_path = REPO_ROOT / "b_ace_py" / "SimpleExample_B_ACE_config.json"
+        config_path = REPO_ROOT / "src" / "b_ace_py" / "SimpleExample_B_ACE_config.json"
 
     bace_cfg = load_b_ace_config(config_path.as_posix())
     ##############################

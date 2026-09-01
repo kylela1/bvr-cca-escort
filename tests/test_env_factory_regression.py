@@ -12,7 +12,7 @@ each have caught one of the two runtime bugs found and fixed during this repo's 
 
 The `slow` tests launch the real Godot binary and take on the order of a minute each. Run
 `pytest -m "not slow"` for a fast loop, or `pytest -m slow` (or plain `pytest`) to include them
--- they require the environment to be set up per HOW_TO_RUN.md (venv + built bin/B_ACE_v0.1.exe).
+-- they require the environment to be set up per docs/HOW_TO_RUN.md (venv + built bin/B_ACE_v0.1.exe).
 """
 
 import sys
@@ -22,7 +22,8 @@ import numpy as np
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-for p in (REPO_ROOT, REPO_ROOT / "rl_files"):
+SRC_ROOT = REPO_ROOT / "src"
+for p in (SRC_ROOT, SRC_ROOT / "rl_files"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
@@ -31,7 +32,7 @@ from b_ace_py.contracts import EXPECTED_OBSERVATION_LABELS
 
 
 def _load_bace_config():
-    cfg = load_b_ace_config(str(REPO_ROOT / "b_ace_py" / "SimpleExample_B_ACE_config.json"))
+    cfg = load_b_ace_config(str(SRC_ROOT / "b_ace_py" / "SimpleExample_B_ACE_config.json"))
     cfg.setdefault("EnvConfig", {})["env_path"] = str(REPO_ROOT / "bin" / "B_ACE_v0.1.exe")
     return cfg
 

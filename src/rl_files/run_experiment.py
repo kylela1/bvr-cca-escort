@@ -43,7 +43,7 @@ def find_repo_root() -> Path:
         ##############################
         # Check if the b_ace_py directory exists in the current directory
         ##############################
-        if (current / "b_ace_py").exists():
+        if (current / "src" / "b_ace_py").exists():
             return current
         current = current.parent
     return Path(__file__).resolve().parent
@@ -275,7 +275,7 @@ Examples:
     ##############################
     else:
         candidates = [
-            repo_root / "rl_files" / "train_bace_clean.py",
+            repo_root / "src" / "rl_files" / "train_bace_clean.py",
             repo_root / "train_bace_clean.py",
             Path(__file__).parent / "train_bace_clean.py",
         ]
@@ -312,7 +312,7 @@ Examples:
         print(f"ERROR: Training script not found: {training_script}")
         sys.exit(1)
 
-    experiment_dir = repo_root / "runs_sb3" / args.experiment_name
+    experiment_dir = repo_root / "results" / "runs_sb3" / args.experiment_name
 
     seeds_to_run = list(args.seeds)
     ##############################

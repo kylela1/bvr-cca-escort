@@ -36,7 +36,7 @@ export PYTHONUTF8=1
 Then run a training job:
 
 ```powershell
-python rl_files/train_bace_clean.py --total-timesteps 10000000 --experiment-name my_first_run
+python src/rl_files/train_bace_clean.py --total-timesteps 10000000 --experiment-name my_first_run
 ```
 
 That's it — this launches Godot in the background, connects over a local socket, and trains
@@ -125,14 +125,14 @@ You're now at the same state as [Quick Start](#quick-start).
 
 Training normally runs fully headless (no window, sped up 200x) for throughput. But you can
 watch the aircraft actually fly in a real Godot window — confirmed working — using a separate
-config file: `b_ace_py/Watch_B_ACE_config.json`. It's identical to the default scenario config
+config file: `src/b_ace_py/Watch_B_ACE_config.json`. It's identical to the default scenario config
 except two settings: `"renderize": 1` (opens a real window instead of headless) and
 `"speed_up": 1` (real-time, so it's actually watchable instead of a blur), plus a different
 port (12600) so it won't collide with a training run already using the default port.
 
 ```powershell
-python rl_files/train_bace_clean.py `
-  --config b_ace_py/Watch_B_ACE_config.json `
+python src/rl_files/train_bace_clean.py `
+  --config src/b_ace_py/Watch_B_ACE_config.json `
   --total-timesteps 2000 --n-steps 512 --batch-size 128 --epochs 1 `
   --run-name watch_session
 ```
@@ -161,8 +161,8 @@ and `Stop-Process -Id <pid> -Force` any that are still there from a session you 
 `evaluate_experiment_seeds.py`, which has dedicated flags for this —
 `--renderize 1 --speed-up 1` — pointed at a completed run's directory:
 ```powershell
-python rl_files/evaluate_experiment_seeds.py `
-  --experiment-dir runs_sb3/<your_experiment> --episodes 5 `
+python src/rl_files/evaluate_experiment_seeds.py `
+  --experiment-dir results/runs_sb3/<your_experiment> --episodes 5 `
   --renderize 1 --speed-up 1
 ```
 This is the more useful mode once you have an actual trained model — it shows you what the
@@ -182,16 +182,16 @@ venv + set `PYTHONUTF8`) and are in the repo root.
 ### A single training run
 
 ```powershell
-python rl_files/train_bace_clean.py `
+python src/rl_files/train_bace_clean.py `
   --total-timesteps 10000000 `
   --experiment-name my_run
 ```
 
 (In Git Bash, replace the backtick line-continuations with `\`.)
 
-This uses the default scenario config (`b_ace_py/SimpleExample_B_ACE_config.json`) and the
+This uses the default scenario config (`src/b_ace_py/SimpleExample_B_ACE_config.json`) and the
 "baseline" observation space (no heuristic features), with a single fixed seed (default 42).
-Output goes to `runs_sb3/my_run/`.
+Output goes to `results/runs_sb3/my_run/`.
 
 ### Turning on the experimental factors
 
@@ -212,7 +212,7 @@ CODEBASE_GUIDE.md §4.3 for why).
 
 Example — Factors B and D together (this is design run "BD" in the thesis's naming):
 ```powershell
-python rl_files/train_bace_clean.py `
+python src/rl_files/train_bace_clean.py `
   --total-timesteps 10000000 `
   --use-enriched-obs --ablation-config engagement_only `
   --expert-alignment `
@@ -221,7 +221,7 @@ python rl_files/train_bace_clean.py `
 
 Example — all three observation factors plus action blending ("ABCE"):
 ```powershell
-python rl_files/train_bace_clean.py `
+python src/rl_files/train_bace_clean.py `
   --total-timesteps 10000000 `
   --use-enriched-obs --ablation-config all `
   --expert-blending `
@@ -234,7 +234,7 @@ different techniques (Factors D and E) and the script will print a warning if yo
 ### Multiple seeds of the same configuration
 
 ```powershell
-python rl_files/run_experiment.py `
+python src/rl_files/run_experiment.py `
   --experiment-name BD_multiseed `
   --seeds 42 123 456 789 `
   --total-timesteps 10000000 `
@@ -242,25 +242,25 @@ python rl_files/run_experiment.py `
 ```
 
 This runs `train_bace_clean.py` once per seed, one after another, saving each under
-`runs_sb3/BD_multiseed/BD_multiseed_seed<N>_<timestamp>/`. **You must pass
+`results/runs_sb3/BD_multiseed/BD_multiseed_seed<N>_<timestamp>/`. **You must pass
 `--total-timesteps` here too** — `run_experiment.py` has no default of its own, and silently
 falls back to `train_bace_clean.py`'s default of 1,000,000, which is far too short.
 
 ### Launching a saved run configuration from a YAML file
 
 Instead of retyping the flag combinations above every time, save them once as a YAML file under
-`configs/` and launch with:
+`config/launch/` and launch with:
 
 ```powershell
-python rl_files/run_from_config.py configs/factor_BD.yaml
+python src/rl_files/run_from_config.py config/launch/factor_BD.yaml
 ```
 
 Each YAML key must equal the `dest` name of a real `train_bace_clean.py` flag (e.g.
 `--total-timesteps` -> `total_timesteps`, `--use-enriched-obs` -> `use_enriched_obs`) — an
 unrecognized key errors out immediately rather than silently doing nothing. Add a `seeds: [42,
 123, ...]` list (instead of a single `seed:`) to delegate to `run_experiment.py` for a
-multi-seed sweep. See `configs/baseline.yaml`, `configs/factor_A.yaml`, `configs/factor_B.yaml`,
-`configs/factor_BD.yaml`, `configs/factor_ABCE.yaml`, and `configs/factor_BD_multiseed.yaml` for
+multi-seed sweep. See `config/launch/baseline.yaml`, `config/launch/factor_A.yaml`, `config/launch/factor_B.yaml`,
+`config/launch/factor_BD.yaml`, `config/launch/factor_ABCE.yaml`, and `config/launch/factor_BD_multiseed.yaml` for
 worked examples matching the factor table above. Pass `--dry-run` to print the constructed
 `train_bace_clean.py`/`run_experiment.py` command without running it.
 
@@ -269,13 +269,13 @@ worked examples matching the factor table above. Pass `--dry-run` to print the c
 Before committing to a multi-hour run, it's worth confirming the pipeline still connects:
 
 ```powershell
-python rl_files/train_bace_clean.py `
+python src/rl_files/train_bace_clean.py `
   --total-timesteps 512 --n-steps 256 --batch-size 64 --epochs 1 `
   --run-name smoketest
 ```
 
 You should see Godot launch, a printed observation-label table, several full episodes run,
-and a "TRAINING COMPLETE!" summary with no traceback. Delete `runs_sb3/smoketest/` afterward
+and a "TRAINING COMPLETE!" summary with no traceback. Delete `results/runs_sb3/smoketest/` afterward
 — it's just a connectivity check, not a real training result.
 
 ---
@@ -285,8 +285,8 @@ and a "TRAINING COMPLETE!" summary with no traceback. Delete `runs_sb3/smoketest
 Once a run (or a multi-seed sweep) has finished:
 
 ```powershell
-python rl_files/evaluate_experiment_seeds.py `
-  --experiment-dir runs_sb3/BD_multiseed `
+python src/rl_files/evaluate_experiment_seeds.py `
+  --experiment-dir results/runs_sb3/BD_multiseed `
   --episodes 200
 ```
 
@@ -307,7 +307,7 @@ what it does and doesn't produce.
 While a run is in progress, in a **second** terminal (with the same venv activated):
 
 ```powershell
-tensorboard --logdir runs_sb3/my_run
+tensorboard --logdir results/runs_sb3/my_run
 ```
 
 Then open the URL it prints (usually `http://localhost:6006`) in a browser.
@@ -321,7 +321,7 @@ across machines) instead of/in addition to TensorBoard, pass `--use-wandb` to
 ```powershell
 pip install wandb   # only needed once, if not already installed
 wandb login          # only needed once
-python rl_files/train_bace_clean.py --use-wandb --wandb-project bvr-cca-escort ...
+python src/rl_files/train_bace_clean.py --use-wandb --wandb-project bvr-cca-escort ...
 ```
 
 This mirrors the exact same TensorBoard scalars to a W&B run (via `sync_tensorboard=True`) — it
@@ -336,10 +336,10 @@ generic training-internals view or a W&B account:
 
 ```powershell
 pip install streamlit matplotlib pandas   # only needed once, if not already installed
-streamlit run tools/dashboard.py
+streamlit run src/tools/dashboard.py
 ```
 
-This opens a browser tab where you can pick one or more completed runs from `runs_sb3/` to
+This opens a browser tab where you can pick one or more completed runs from `results/runs_sb3/` to
 compare. It only reads existing output files (`monitor.csv`, `training_results_seed<N>.json`)
 and never modifies or affects training in any way.
 
@@ -366,7 +366,7 @@ and never modifies or affects training in any way.
 | `waiting for remote GODOT connection on port ...` hangs forever | Another Godot process (from a previous crashed run) may still be holding the port. Check Task Manager for lingering `B_ACE_v0.1.exe` processes and end them, then retry. |
 | Training runs but nothing seems to improve | Expected for short runs — meaningful learning in this environment takes millions of timesteps, not thousands. Use TensorBoard to check `eval/mean_reward` over a long run, not a smoke test. |
 | `ModuleNotFoundError` for any package | Confirm the venv is activated (`(.venv)` should be showing in your prompt) — `pip install` the missing package if it's genuinely not in the list above. |
-| You want to change what's rewarded/penalized | The reward function is spread across `Godot_Air_Combat/assets/Sim_assets.gd` (Godot side) and ~10 wrapper classes chained together in `rl_files/env_factory.py`'s `build_env()` function (Python side) — there is no single file to edit. See CODEBASE_GUIDE.md §1 and §5.1. |
+| You want to change what's rewarded/penalized | The reward function is spread across `Godot_Air_Combat/assets/Sim_assets.gd` (Godot side) and ~10 wrapper classes chained together in `src/rl_files/env_factory.py`'s `build_env()` function (Python side) — there is no single file to edit. See CODEBASE_GUIDE.md §1 and §5.1. |
 | You want to launch a saved config, mirror to W&B, or use the results dashboard | See [Launching a saved run configuration from a YAML file](#launching-a-saved-run-configuration-from-a-yaml-file) / [Optional: mirror to Weights & Biases](#optional-mirror-to-weights--biases) / [Optional: a local results-browsing dashboard](#optional-a-local-results-browsing-dashboard-no-cloud-account-needed) above. |
 
 For anything not covered here — what the code does, why a specific number looks off, how to
