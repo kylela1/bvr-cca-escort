@@ -2,7 +2,7 @@
 
 A concise guide to running the experiment the way Capt. Bieger's thesis describes, and to what
 is/isn't actually reproducible from this repository. Read this before assuming a described
-capability exists in code — three important pieces (marked below) were **never checked into
+capability exists in code — two important pieces (marked below) were **never checked into
 this repo** and would need to be rebuilt or done manually.
 
 ---
@@ -15,12 +15,12 @@ this repo** and would need to be rebuilt or done manually.
 | Watching the agent live in a real Godot window, at any checkpoint | **Yes** (§4) |
 | Saving that as an actual video file | **No** — see §4 caveat |
 | Optuna hyperparameter search | **No** — only the winning values remain, hardcoded (§5) |
-| The multi-seed "AlgScore / 95% CI" figure style (like the one you attached) | **No** — no plotting code for this exists anywhere in the repo (§6) |
+| A multi-seed "AlgScore / 95% CI" learning-curve figure (like the one that motivated this doc) | **Yes, now** — added this session, see §6. Not a verified reproduction of Bieger's original tool (that one's still not in this repo) — a fresh implementation of the same idea. |
 
-This isn't a bug — it's confirmed by grepping the entire repo history on every branch: zero hits
-for `optuna`, and zero hits for the terms in the AlgScore chart title (`AlgScore`, `Peak_LCB`,
-`AUC_LCB`) in any Python file. Whatever tooling Bieger used for those two things lived outside
-this checkout.
+The Optuna and video gaps aren't bugs — they're confirmed by grepping the entire repo history on
+every branch: zero hits for `optuna` anywhere. Whatever tooling Bieger used for hyperparameter
+search lived outside this checkout, and no automatic video-file output was ever implemented (see
+§4).
 
 ---
 
@@ -147,31 +147,36 @@ in-repo.
 
 ---
 
-## 6. The AlgScore / per-seed confidence-interval figure — not reproducible as-is
+## 6. The AlgScore / per-seed confidence-interval figure
 
-No plotting code for this exists anywhere in the repo (`matplotlib`/`pandas` usage only appears
-in tooling written this session — `src/analysis/`, `src/tools/dashboard.py` — and neither
-computes AlgScore). The formula is only known from the chart title itself:
+**Implemented this session** (`src/rl_files/experiment_statistics.py`), and wired into
+`evaluate_experiment_seeds.py`'s default (superlative) mode — it runs automatically every time
+you evaluate an experiment, no extra flag needed:
 
+```powershell
+python src\rl_files\evaluate_experiment_seeds.py `
+  --experiment-dir results\runs_sb3\BD_multiseed --episodes 100
+```
+This now also writes `results\runs_sb3\BD_multiseed\learning_curve_analysis.png` — every seed's
+`eval/mean_reward` curve, a black cross-seed mean line, a shaded 95% CI band, and a
+Peak-Return/AUC/AlgScore summary in the title — plus the same numbers under a
+`"learning_curve_analysis"` key in `superlative_eval_results.json`. Pass `--skip-figures` to
+disable it (e.g. running without matplotlib installed).
+
+**Provenance caveat, unchanged from before**: no code implementing this ever existed anywhere in
+this repo's history, on any branch — the formula is only known from a reference chart's title
+text, not from recovered source. This implementation is a same-name reconstruction, not a
+verified reproduction of Bieger's original tool:
 ```
 AlgScore = 0.6 * Peak_LCB + 0.4 * AUC_LCB
 ```
-where `Peak_LCB` and `AUC_LCB` are the lower bound of a 95% CI (across seeds) on, respectively,
-the **peak** mean evaluation return reached during training and the **area under** the
-evaluation-return-vs-training-steps curve. Nothing computes either quantity in this repo today.
-
-To rebuild this figure, you'd need a new script that:
-1. Reads each seed's periodic evaluation curve (`eval/mean_reward` vs. step) out of that seed's
-   TensorBoard `events.out.tfevents.*` file — the same `EventAccumulator` approach
-   `src/analysis/generate_figures.py` already uses for a single seed, just looped over every seed
-   in an experiment directory.
-2. Computes per-seed peak return and per-seed AUC (e.g. `np.trapz(rewards, steps)`).
-3. Takes a 95% CI (across seeds, same t-distribution approach already used in
-   `evaluate_experiment_seeds.py`'s `t_distribution_ci`) on both, to get `Peak_LCB`/`AUC_LCB`.
-4. Combines them with the weights above, and plots per-seed curves + the cross-seed mean/CI band
-   the way the attached image does.
-
-This is a genuinely new script, not a flag you're missing — ask if you want it built.
+`Peak_LCB`/`AUC_LCB` are read as the lower bound of a 95% cross-seed CI (t-distribution, the same
+`stats_utils.t_distribution_ci` `evaluate_experiment_seeds.py` uses elsewhere) on, respectively,
+each seed's peak `eval/mean_reward` and a **time-averaged** AUC (area under the curve divided by
+step range, so it's on the same reward scale as peak return — a raw unnormalized area would mix
+incompatible units with a 0.6/0.4 weighted sum). Seeds are aligned onto a common step grid via
+linear interpolation before averaging, since they don't necessarily log at identical steps. If
+you have the actual original formula, tell me and I'll match it exactly instead.
 
 ---
 

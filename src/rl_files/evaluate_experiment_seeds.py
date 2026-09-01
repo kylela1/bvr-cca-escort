@@ -70,19 +70,7 @@ print(f"Using REPO_ROOT: {REPO_ROOT}")
 from b_ace_py.utils import load_b_ace_config
 
 from env_factory import build_env, get_split_norm_wrapper_from_vec_env, FULLY_ANNEALED_STEP
-
-
-@dataclass
-class ConfidenceInterval:
-    """Stores a metric with its confidence interval."""
-    mean: float
-    ci_lower: float
-    ci_upper: float
-    ci_width: float
-    n: int
-    method: str
-    count: Optional[int] = None
-    std: Optional[float] = None
+from stats_utils import ConfidenceInterval, wilson_score_interval, t_distribution_ci
 
 
 @dataclass
@@ -127,60 +115,6 @@ class SeedResults:
     red_shot_first_rate: float
     no_shots_rate: float
     episodes: List[EpisodeData]
-
-
-def wilson_score_interval(successes: int, total: int, confidence: float = 0.95) -> ConfidenceInterval:
-    """Wilson score CI for binomial proportions."""
-    ##############################
-    # Handle edge case of zero trials
-    ##############################
-    if total == 0:
-        return ConfidenceInterval(0.0, 0.0, 0.0, 0.0, 0, "wilson_score", count=0)
-
-    z = stats.norm.ppf(1 - (1 - confidence) / 2)
-    p = successes / total
-
-    denominator = 1 + z**2 / total
-    center = (p + z**2 / (2 * total)) / denominator
-    margin = z * np.sqrt((p * (1 - p) + z**2 / (4 * total)) / total) / denominator
-
-    return ConfidenceInterval(
-        mean=float(p),
-        ci_lower=float(max(0, center - margin)),
-        ci_upper=float(min(1, center + margin)),
-        ci_width=float(min(1, center + margin) - max(0, center - margin)),
-        n=total,
-        method="wilson_score",
-        count=successes
-    )
-
-
-def t_distribution_ci(data: List[float], confidence: float = 0.95) -> ConfidenceInterval:
-    """t-distribution CI for continuous data."""
-    arr = np.array(data)
-    n = len(arr)
-
-    ##############################
-    # Handle case of very few data points (less than 2 samples)
-    ##############################
-    if n < 2:
-        mean = float(np.mean(arr)) if n > 0 else 0.0
-        return ConfidenceInterval(mean, mean, mean, 0.0, n, "t_distribution", std=0.0)
-
-    mean = float(np.mean(arr))
-    std = float(np.std(arr, ddof=1))
-    sem = stats.sem(arr)
-    h = sem * stats.t.ppf((1 + confidence) / 2, n - 1)
-
-    return ConfidenceInterval(
-        mean=mean,
-        ci_lower=float(mean - h),
-        ci_upper=float(mean + h),
-        ci_width=float(2 * h),
-        n=n,
-        method="t_distribution",
-        std=std
-    )
 
 
 class _DummyVecEnv:
@@ -1414,6 +1348,11 @@ def parse_args():
     p.add_argument("--output-file", type=str, default=None,
                    help="Output JSON path (default: <experiment_dir>/superlative_eval_results.json)")
 
+    p.add_argument("--skip-figures", action="store_true", default=False,
+                   help="Skip the automatic cross-seed learning-curve figure + Peak/AUC/AlgScore "
+                        "statistics (see experiment_statistics.py) that superlative mode "
+                        "otherwise generates from each seed's TensorBoard eval curve.")
+
     p.add_argument("--no-strict-validation", action="store_true", default=False,
                    help="Continue even if observation dimension doesn't match")
 
@@ -1934,6 +1873,21 @@ def main():
     print_results(all_seed_results, aggregate)
 
     ##############################
+    # Cross-seed learning-curve figure + Peak/AUC/AlgScore statistics (see
+    # experiment_statistics.py). Best-effort: a failure here must never discard the real
+    # episode-evaluation results computed above, so it's isolated in its own try/except.
+    ##############################
+    learning_curve_analysis = None
+    if not args.skip_figures:
+        try:
+            from experiment_statistics import generate_experiment_analysis
+            learning_curve_analysis = generate_experiment_analysis(
+                experiment_dir, experiment_dir.name, experiment_dir,
+            )
+        except Exception as e:
+            print(f"   [Learning-Curve Analysis] Skipped due to error: {e}")
+
+    ##############################
     # Prepare output data for superlative mode
     ##############################
     output_data = {
@@ -1949,6 +1903,7 @@ def main():
             "feature_config": feature_config,
         },
         "aggregate": aggregate,
+        "learning_curve_analysis": learning_curve_analysis,
         "per_seed_results": {
             sr.seed_name: {
                 "model_path": sr.model_path,

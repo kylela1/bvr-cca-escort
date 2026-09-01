@@ -130,7 +130,9 @@ geometry_only` means "Factor A only," not literally "geometry."
 | `train_bace_clean.py` (1,515 lines, down from 2,627) | **The file you'll edit most for hyperparameters/CLI flags.** Parses ~55 CLI flags (including `--use-wandb`/`--wandb-project`/`--wandb-entity`, new — see §4.5), calls `env_factory.build_env()` to construct the environment, constructs a `SkippableTrainPPO` model (see below) with the tuned hyperparameters as CLI defaults, trains via `model.learn()`, and runs a small ad-hoc final evaluation. No longer defines the reward-shaping wrapper classes itself (moved to `env_factory.py`) or the dead `ExpertRolloutBuffer`/`ExpertMixPPO` alternative-PPO implementation (deleted — see §5.4). |
 | `run_experiment.py` (523 lines) | A generic multi-seed launcher: loops over `--seeds`, invokes `train_bace_clean.py` once per seed via `subprocess`, forwarding any flags it doesn't itself recognize straight through (this pass-through is also what `run_from_config.py`'s multi-seed configs rely on — see §4.5). **It does not know about the 5 experimental factors or the 16-18 design configurations** — see §4.1, this is an important correction to how you might expect this file to work. |
 | `run_from_config.py` (new) | Declarative YAML run launcher (`python src/rl_files/run_from_config.py config/launch/factor_BD.yaml`) — see §4.5. Converts YAML keys (which must equal a real `train_bace_clean.py` argparse `dest` name) into the equivalent CLI invocation and shells out to it via `subprocess`, so a YAML-launched run can never diverge from the equivalent hand-typed command. Delegates to `run_experiment.py` for multi-seed configs (a `seeds:` list in the YAML) rather than reimplementing the seed loop. |
-| `evaluate_experiment_seeds.py` (1,969 lines, down from 2,173) | Loads trained checkpoints + `VecNormalize` stats per seed, runs deterministic evaluation episodes, and computes per-seed / cross-seed statistics. Implements far less of the thesis's Chapter IV statistical machinery than you'd expect — see §4.1. Its evaluation environment now calls `env_factory.build_env(..., is_eval=True)` — see §2.3/§5.3 for what changed. |
+| `evaluate_experiment_seeds.py` (1,969 lines, down from 2,173) | Loads trained checkpoints + `VecNormalize` stats per seed, runs deterministic evaluation episodes, and computes per-seed / cross-seed statistics. Implements far less of the thesis's Chapter IV statistical machinery than you'd expect — see §4.1. Its evaluation environment now calls `env_factory.build_env(..., is_eval=True)` — see §2.3/§5.3 for what changed. In its default (superlative) mode, also calls `experiment_statistics.py` to generate a cross-seed learning-curve figure unless `--skip-figures` is passed. |
+| `stats_utils.py` **(new)** | `ConfidenceInterval`, `wilson_score_interval()`, `t_distribution_ci()` — split out of `evaluate_experiment_seeds.py` so `experiment_statistics.py` can import them without a circular import. |
+| `experiment_statistics.py` **(new)** | Reads each seed's `eval/mean_reward` TensorBoard curve, aligns them onto a common step grid, computes a cross-seed mean + 95% CI band over training, and a Peak-Return/AUC/AlgScore summary. See `docs/THESIS_REPRODUCTION_GUIDE.md` §6 for the provenance caveat on the AlgScore formula. |
 
 **Wrapper/callback files** (all imported and layered together inside `env_factory.py`'s
 `build_env()`, called by both `train_bace_clean.py` and `evaluate_experiment_seeds.py`):
@@ -826,23 +828,24 @@ Worth knowing if you plan to extend or verify the observation-feature math. Cros
   invocations are recorded in-repo. If you need to reproduce a specific design run, you have to
   reconstruct its flags yourself from the factor→flag mapping in §2.1/§4.3, there's no saved
   master table.
-- **`evaluate_experiment_seeds.py` does not compute**: AlgScore, MaxLCB/AUC_LCB, main-effects
-  tables, ANOVA-style F-tests, pairwise-vs-Baseline comparisons at the α=0.05/0.10/0.20
-  thresholds, or a "superlative ceiling" table distinct from the cross-seed aggregate — none of
-  Chapter IV's statistical apparatus exists in this script. It only computes per-seed episode
-  stats and a straightforward cross-seed t-distribution confidence interval (which does
-  correctly treat each seed's mean as one data point — a genuine strength). **"Win Rate" (both
-  CCA and HVAA survive), the thesis's headline metric, is never actually computed anywhere in
-  this file**, though it's trivially derivable from two fields (`hvaa_survived`, `blue_killed`)
-  that already exist per-episode.
+- **`evaluate_experiment_seeds.py` does not compute**: main-effects tables, ANOVA-style F-tests,
+  pairwise-vs-Baseline comparisons at the α=0.05/0.10/0.20 thresholds, or a "superlative ceiling"
+  table distinct from the cross-seed aggregate — none of Chapter IV's statistical apparatus
+  exists in this script. It computes per-seed episode stats and a straightforward cross-seed
+  t-distribution confidence interval (which does correctly treat each seed's mean as one data
+  point — a genuine strength), including **win rate** (both CCA and HVAA survive) and, as of this
+  session, a cross-seed learning-curve figure with a Peak-Return/AUC/AlgScore summary
+  (`experiment_statistics.py`, called automatically unless `--skip-figures` is passed) — see
+  `docs/THESIS_REPRODUCTION_GUIDE.md` §6 for what that figure does and doesn't verify against
+  Bieger's original tool (short version: the formula is a same-name reconstruction, not a
+  recovered original).
 - No Optuna hyperparameter-search script exists anywhere in the repo, despite the thesis's
   detailed two-stage Search One/Search Two description (150 + 70 trials). The winning
   hyperparameters are hardcoded as `argparse` defaults in `train_bace_clean.py`, but the search
   process that produced them isn't included.
-- No plotting/analysis code exists anywhere (`matplotlib`/`pandas`/`seaborn`/`plotly` all
-  return zero hits repo-wide) — the thesis's learning-curve figures, the hyperparameter
-  Pearson-correlation bar chart, and the various summary tables were produced by tooling not
-  included in this checkout.
+- Beyond the `evaluate_experiment_seeds.py` figure above, the thesis's own learning-curve
+  figures, hyperparameter Pearson-correlation bar chart, and various summary tables were produced
+  by tooling not included in this checkout.
 
 ### 5.7 Code-quality / practice issues
 

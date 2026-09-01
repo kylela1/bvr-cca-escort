@@ -295,10 +295,13 @@ evaluation script does not reliably auto-detect which observation features a che
 trained with (see CODEBASE_GUIDE.md §5.3). E.g., if you trained with
 `--ablation-config engagement_only`, evaluate with `--ablation-config engagement_only` as well.
 
-Note: this script computes per-episode outcomes and cross-seed confidence intervals, but it
-does **not** compute the thesis's full statistical tables (AlgScore, main-effects/ANOVA,
-pairwise-vs-baseline, or even win rate directly) — see CODEBASE_GUIDE.md §5.6 for exactly
-what it does and doesn't produce.
+This computes per-episode outcomes (including win rate) and cross-seed 95% confidence intervals
+on all of them. It also automatically generates a cross-seed learning-curve figure
+(`<experiment-dir>/learning_curve_analysis.png`) with a Peak-Return/AUC/AlgScore summary — pass
+`--skip-figures` to skip this (e.g. if matplotlib isn't installed). See
+`docs/THESIS_REPRODUCTION_GUIDE.md` §6 for exactly what that figure measures and its provenance
+caveat. Still **not** produced: the thesis's main-effects/ANOVA tables or pairwise-vs-baseline
+significance tests — see CODEBASE_GUIDE.md §5.6.
 
 ---
 
