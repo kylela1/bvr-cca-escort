@@ -204,7 +204,7 @@ def plot_experiment_learning_curves(
                  color=INK_PRIMARY, x=0.01, ha="left", y=1.0)
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(
         lambda x, _: f"{x/1e6:.1f}M" if x >= 1e6 else f"{x/1e3:.0f}K"))
-    ax.legend(loc="lower right", frameon=True, fontsize=8.5, labelcolor=INK_SECONDARY,
+    ax.legend(loc="best", frameon=True, fontsize=8.5, labelcolor=INK_SECONDARY,
                facecolor=SURFACE, edgecolor=GRIDLINE)
 
     fig.text(0.01, -0.02,
