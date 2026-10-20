@@ -1,0 +1,29 @@
+.git/
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Regenerable/large; the Dockerfile exports its own Linux binary from source
+bin/
+Godot_Air_Combat/.godot/
+Godot_Air_Combat/.import/
+Godot_Air_Combat/export_presets.cfg.import
+
+# Training outputs -- never baked into the image, mount a host dir instead
+results/
+runs/
+logs/
+tensorboard/
+wandb/
+checkpoints/
+models/
+
+docs/
+.claude/
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
